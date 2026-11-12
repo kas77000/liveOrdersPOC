@@ -1,0 +1,7 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pandas>=2.0
+# needed only against a real kdb+ RDB (without KDB_HOST the app runs on simulated data)
+pykx>=2.5
+# dev
+pytest

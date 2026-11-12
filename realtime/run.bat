@@ -1,0 +1,12 @@
+@echo off
+REM Version 2 - real-time: subscribes to the tickerplant, snapshot from the RDB. http://localhost:8001
+REM Leave KDB_HOST or TP_HOST empty to run on simulated data.
+REM Check the tickerplant first with:  ..\.venv\Scripts\python scripts\check_tickerplant.py HOST PORT
+REM set KDB_HOST=your-oms-rdb-host
+REM set KDB_PORT=5000
+REM set TP_HOST=your-oms-tickerplant-host
+REM set TP_PORT=5010
+REM set KDB_USER=
+REM set KDB_PASS=
+cd /d %~dp0
+..\.venv\Scripts\python -m uvicorn backend.app:app --host 0.0.0.0 --port 8001
