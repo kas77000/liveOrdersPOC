@@ -31,20 +31,29 @@ COLUMNS = {
 TABLES = list(COLUMNS)
 
 # RDB tables are append-only during the day, so the rows after the ones already seen
-# are exactly the new ones (`where i>=n` uses the row index, no scan of the data).
-# They are collapsed to one row per order inside q -- the same merge OrderCache does --
-# so the first load of the day ships one row per order instead of every tick.
+# are exactly the new ones; `sublist` takes them by position. They are then collapsed
+# to one row per order inside q -- the same merge OrderCache does -- so the first load
+# of the day ships one row per order instead of every tick.
 # Returns (reset; count; rows). If the table got shorter (end-of-day reset or RDB
 # restart) the whole table comes back with reset=1b.
-# The start row s is computed outside the select: $[;;] inside a q-sql where clause
-# is read as the dyadic cast and fails with 'rank.
+# Built only from forms known to work on the OMS RDB: the original sublist query and
+# `0!select c:agg c by key from local` (as in kdb-queries). Locals have names no
+# column will have, since inside a select a column shadows a local.
 INCREMENTAL_Q = (
-    "{{[n] c:count {t}; r:c<n; s:$[r;0;n]; "
-    "(r; c; {agg} by id_server,id_target from select {cols} from {t} where i>=s)}}"
+    "{{[n] lqCnt:count {t}; lqRst:lqCnt<n; lqBeg:$[lqRst;0;n]; "
+    "lqTbl:(lqBeg; lqCnt-lqBeg) sublist select {cols} from {t}; "
+    "lqTbl:0!select {agg} by id_server,id_target from lqTbl; "
+    "(lqRst; lqCnt; lqTbl)}}"
 )
-# per-table collapse; must agree with OrderCache.apply
-AGG = {t: "0!select" for t in COLUMNS}
-AGG["target_state"] = "0!select max make"
+
+
+def _agg(table: str) -> str:
+    """Per-table collapse; must agree with OrderCache.apply (max make, else last)."""
+    fn = "max" if table == "target_state" else "last"
+    return ",".join(f"{c}:{fn} {c}" for c in COLUMNS[table] if c not in KEY)
+
+
+AGG = {t: _agg(t) for t in COLUMNS}
 
 
 class OrderCache:
