@@ -78,7 +78,7 @@ function App() {
   const { rows, status, changed, wsUp } = useLiveOrders();
   const [sort, setSort] = useState({ key: "amount_usd", dir: -1 });
   const [query, setQuery] = useState("");
-  const [hideDone, setHideDone] = useState(false);
+  const [hideDone, setHideDone] = useState(true);
   const [advanced, setAdvanced] = useState(() => {
     try { return localStorage.getItem("advanced") === "1"; } catch { return false; }
   });
