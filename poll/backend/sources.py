@@ -71,7 +71,19 @@ class OrderCache:
 
 def _to_df(x) -> pd.DataFrame:
     df = x.pd() if hasattr(x, "pd") else pd.DataFrame(x)
-    return df.reset_index() if df.index.names[0] is not None else df
+    df = df.reset_index() if df.index.names[0] is not None else df
+    # q strings (char vectors) arrive as bytes; the transform expects str.
+    for c in df.columns:
+        if df[c].dtype == object and df[c].map(lambda v: isinstance(v, bytes)).any():
+            df[c] = df[c].map(lambda v: v.decode("utf-8", "replace") if isinstance(v, bytes) else v)
+    return df
+
+
+def _split(res):
+    """(head, tail) of a 2-item q list WITHOUT indexing the K object: PyKX/KDB-X Python
+    in unlicensed mode refuses `res[i]` but still allows conversion with .py()."""
+    head, tail = _to_list(res)[:2]
+    return head, tail
 
 
 # --------------------------------------------------------------------------- poll
@@ -101,7 +113,8 @@ class KdbSource:
         """(reset?, rows from position n onwards). Overridden in tests."""
         q = INCREMENTAL_Q.format(t=table, cols=",".join(COLUMNS[table]))
         res = self._handle()(q, n)
-        return bool(res[0].py()), _to_df(res[1])
+        reset, rows = _split(res)
+        return bool(reset), _to_df(rows)
 
     def sync(self, tables=TABLES):
         """Pull new rows for `tables` into the cache."""
@@ -218,3 +231,12 @@ class MockSource:
 
     def close(self):
         pass
+
+
+def _to_list(x):
+    if hasattr(x, "py"):
+        try:
+            return x.py()
+        except Exception:
+            return list(x)
+    return x
