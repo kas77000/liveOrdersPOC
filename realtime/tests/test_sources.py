@@ -32,9 +32,9 @@ class FakeRdb(KdbSource):
 def test_incremental_q_takes_new_rows_collapsed_per_order():
     q = INCREMENTAL_Q.format(t="target_state", agg=AGG["target_state"],
                              cols="id_server,id_target,make")
-    assert q == ("{[n] c:count target_state; r:c<n; "
+    assert q == ("{[n] c:count target_state; r:c<n; s:$[r;0;n]; "
                  "(r; c; 0!select max make by id_server,id_target from "
-                 "select id_server,id_target,make from target_state where i>=$[r;0;n])}")
+                 "select id_server,id_target,make from target_state where i>=s)}")
     assert AGG["target"] == "0!select"     # last row per order, like OrderCache
 
 

@@ -36,9 +36,11 @@ TABLES = list(COLUMNS)
 # so the first load of the day ships one row per order instead of every tick.
 # Returns (reset; count; rows). If the table got shorter (end-of-day reset or RDB
 # restart) the whole table comes back with reset=1b.
+# The start row s is computed outside the select: $[;;] inside a q-sql where clause
+# is read as the dyadic cast and fails with 'rank.
 INCREMENTAL_Q = (
-    "{{[n] c:count {t}; r:c<n; "
-    "(r; c; {agg} by id_server,id_target from select {cols} from {t} where i>=$[r;0;n])}}"
+    "{{[n] c:count {t}; r:c<n; s:$[r;0;n]; "
+    "(r; c; {agg} by id_server,id_target from select {cols} from {t} where i>=s)}}"
 )
 # per-table collapse; must agree with OrderCache.apply
 AGG = {t: "0!select" for t in COLUMNS}
