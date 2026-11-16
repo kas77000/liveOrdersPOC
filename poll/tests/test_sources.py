@@ -1,6 +1,6 @@
 import pandas as pd
 
-from backend.sources import COLUMNS, INCREMENTAL_Q, KdbSource, OrderCache
+from backend.sources import COLUMNS, AGG, INCREMENTAL_Q, KdbSource, OrderCache
 from backend.transform import build_rows
 
 
@@ -24,14 +24,17 @@ class FakeRdb(KdbSource):
         rows = self.tables[table]
         self.reads.append((table, n))
         if len(rows) < n:
-            return True, pd.DataFrame(rows, columns=COLUMNS[table])
-        return False, pd.DataFrame(rows[n:], columns=COLUMNS[table])
+            return True, len(rows), pd.DataFrame(rows, columns=COLUMNS[table])
+        return False, len(rows), pd.DataFrame(rows[n:], columns=COLUMNS[table])
 
 
-def test_incremental_q_takes_rows_by_position():
-    q = INCREMENTAL_Q.format(t="target_state", cols="id_server,id_target,make")
-    assert q == ("{[n] c:count target_state; t:select id_server,id_target,make from target_state; "
-                 "$[c<n; (1b; t); (0b; (n; c-n) sublist t)]}")
+def test_incremental_q_takes_new_rows_collapsed_per_order():
+    q = INCREMENTAL_Q.format(t="target_state", agg=AGG["target_state"],
+                             cols="id_server,id_target,make")
+    assert q == ("{[n] c:count target_state; r:c<n; "
+                 "(r; c; 0!select max make by id_server,id_target from "
+                 "select id_server,id_target,make from target_state where i>=$[r;0;n])}")
+    assert AGG["target"] == "0!select"     # last row per order, like OrderCache
 
 
 def test_poll_reads_only_new_rows():

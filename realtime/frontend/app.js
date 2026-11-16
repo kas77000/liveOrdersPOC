@@ -1,5 +1,9 @@
 // Live Orders blotter. React 18 + htm (JSX-like templates, no build step).
-const { useEffect, useMemo, useRef, useState } = React;
+const { memo, useDeferredValue, useEffect, useMemo, useRef, useState } = React;
+
+// Rendering thousands of <tr> on every keystroke/poll is what made typing lag;
+// the table shows the top MAX_ROWS of the current sort/filter.
+const MAX_ROWS = 500;
 const html = htm.bind(React.createElement);
 
 const DASH = html`<span class="dash">–</span>`;
@@ -10,8 +14,10 @@ const txt = (v) => (v == null || v === "" ? DASH : v);
 
 const FLOW_PILL = { Agency: "amber", Swap: "green" };
 
-// [key, header, render, numeric?]
+// [key, header, render, numeric?, advanced?]  advanced columns show only when
+// "Show advanced information" is ticked.
 const COLUMNS = [
+  ["id_target", "ID", (r) => txt(r.id_target), true, true],
   ["sym", "Symbol", (r) => html`<b>${r.sym}</b>`],
   ["side", "Side", (r) => html`<span class=${"side-" + r.side}>${txt(r.side)}</span>`],
   ["limit", "Limit", (r) => (r.limit == null ? html`<span class="pill grey">MKT</span>` : fmtNum(r.limit, 2)), true],
@@ -28,7 +34,7 @@ const COLUMNS = [
   ["pct_filled", "% Filled", (r) => r.pct_filled == null ? DASH : html`
       <span class="bar" title=${`${fmtNum(r.filled)} / ${fmtNum(r.size)}`}>
         <span class="track"><span class="fill" style=${{ width: Math.min(100, r.pct_filled) + "%" }}></span></span>
-        ${r.pct_filled.toFixed(1)}%
+        <span class="pct">${r.pct_filled.toFixed(1)}%</span>
       </span>`, true],
   ["amount_usd", "Amount USD", (r) => (r.amount_usd == null ? DASH : "$" + fmtNum(r.amount_usd)), true],
 ];
@@ -73,21 +79,39 @@ function App() {
   const [sort, setSort] = useState({ key: "amount_usd", dir: -1 });
   const [query, setQuery] = useState("");
   const [hideDone, setHideDone] = useState(false);
+  const [advanced, setAdvanced] = useState(() => {
+    try { return localStorage.getItem("advanced") === "1"; } catch { return false; }
+  });
+  const toggleAdvanced = (on) => {
+    setAdvanced(on);
+    // don't stay sorted by a column that just disappeared
+    if (!on) setSort((s) => (COLUMNS.find((c) => c[0] === s.key)?.[4] ? { key: "amount_usd", dir: -1 } : s));
+    try { localStorage.setItem("advanced", on ? "1" : "0"); } catch {}
+  };
+  const cols = useMemo(() => COLUMNS.filter((c) => advanced || !c[4]), [advanced]);
+
+  // Deferred copies: the search box updates at once, the table catches up in the
+  // background (and is interrupted by the next keystroke instead of blocking it).
+  const dRows = useDeferredValue(rows);
+  const dQuery = useDeferredValue(query);
+  const dSort = useDeferredValue(sort);
+  const dHideDone = useDeferredValue(hideDone);
 
   const list = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    let out = Object.values(rows);
-    if (hideDone) out = out.filter((r) => !(r.pct_filled >= 100));
+    const q = dQuery.trim().toLowerCase();
+    let out = Object.values(dRows);
+    if (dHideDone) out = out.filter((r) => !(r.pct_filled >= 100));
     if (q) out = out.filter((r) =>
       [r.sym, r.client, r.strategy, r.market, r.flow_type, r.account, String(r.id_target)]
         .some((v) => v && String(v).toLowerCase().includes(q)));
-    const { key, dir } = sort;
+    const { key, dir } = dSort;
     return out.sort((a, b) => {
       const x = a[key], y = b[key];
       if (x == null) return 1; if (y == null) return -1;
       return (x < y ? -1 : x > y ? 1 : 0) * dir;
     });
-  }, [rows, sort, query, hideDone]);
+  }, [dRows, dSort, dQuery, dHideDone]);
+  const shown = list.length > MAX_ROWS ? list.slice(0, MAX_ROWS) : list;
 
 
   const ok = wsUp && status.ok;
@@ -105,6 +129,8 @@ function App() {
                onInput=${(e) => setQuery(e.target.value)} />
         <label><input type="checkbox" checked=${hideDone} onChange=${(e) => setHideDone(e.target.checked)} />
           Hide fully filled</label>
+        <label><input type="checkbox" checked=${advanced} onChange=${(e) => toggleAdvanced(e.target.checked)} />
+          Show advanced information</label>
         <div class="conn" title=${status.error || ""}>
           <span class=${"dot" + (ok ? " ok" : "")}></span>
           ${wsUp ? status.source : "disconnected"} · ${updated}
@@ -114,28 +140,31 @@ function App() {
       <div class="scroll">
         <table>
           <thead><tr>
-            ${COLUMNS.map(([k, label, , num]) => html`
+            ${cols.map(([k, label, , num]) => html`
               <th key=${k} class=${num ? "num" : ""}
                   onClick=${() => setSort((s) => ({ key: k, dir: s.key === k ? -s.dir : -1 }))}>
                 ${label}${sort.key === k ? (sort.dir < 0 ? " ▼" : " ▲") : ""}
               </th>`)}
           </tr></thead>
           <tbody>
-            ${list.map((r) => html`
-              <${Row} key=${r.key} r=${r} stamp=${changed[r.key]} />`)}
+            ${shown.map((r) => html`
+              <${Row} key=${r.key} r=${r} cols=${cols} stamp=${changed[r.key]} />`)}
           </tbody>
         </table>
         ${list.length === 0 ? html`<div class="empty">No orders.</div>` : null}
+        ${list.length > MAX_ROWS ? html`<div class="empty">Showing ${MAX_ROWS} of ${list.length} orders — refine the filter or change the sort.</div>` : null}
       </div>
     </div>`;
 }
 
 // Re-keying the <tr> by the change stamp restarts the CSS flash animation.
-function Row({ r, stamp }) {
+// memo: rows whose data and stamp did not change are skipped on re-render (deltas
+// keep the same object for unchanged rows).
+const Row = memo(function Row({ r, cols, stamp }) {
   return html`
     <tr key=${stamp || 0} class=${stamp && Date.now() - stamp < 1500 ? "flash" : ""}>
-      ${COLUMNS.map(([k, , render, num]) => html`<td key=${k} class=${num ? "num" : ""}>${render(r)}</td>`)}
+      ${cols.map(([k, , render, num]) => html`<td key=${k} class=${num ? "num" : ""}>${render(r)}</td>`)}
     </tr>`;
-}
+});
 
 ReactDOM.createRoot(document.getElementById("root")).render(html`<${App} />`);

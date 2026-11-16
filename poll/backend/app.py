@@ -55,7 +55,7 @@ class Hub:
             t0 = time.monotonic()
             try:
                 frames = await asyncio.to_thread(self.source.fetch)
-                new = {r["key"]: r for r in build_rows(**frames)}
+                new = {r["key"]: r for r in await asyncio.to_thread(lambda: build_rows(**frames))}
                 upserts = [r for k, r in new.items() if self.rows.get(k) != r]
                 removes = [k for k in self.rows if k not in new]
                 self.rows = new

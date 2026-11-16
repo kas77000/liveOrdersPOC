@@ -31,13 +31,18 @@ COLUMNS = {
 TABLES = list(COLUMNS)
 
 # RDB tables are append-only during the day, so the rows after the ones already seen
-# are exactly the new ones. `sublist` takes them by position without scanning the table.
-# If the table got shorter (end-of-day reset or RDB restart) the whole table comes back
-# with a reset flag.
+# are exactly the new ones (`where i>=n` uses the row index, no scan of the data).
+# They are collapsed to one row per order inside q -- the same merge OrderCache does --
+# so the first load of the day ships one row per order instead of every tick.
+# Returns (reset; count; rows). If the table got shorter (end-of-day reset or RDB
+# restart) the whole table comes back with reset=1b.
 INCREMENTAL_Q = (
-    "{{[n] c:count {t}; t:select {cols} from {t}; "
-    "$[c<n; (1b; t); (0b; (n; c-n) sublist t)]}}"
+    "{{[n] c:count {t}; r:c<n; "
+    "(r; c; {agg} by id_server,id_target from select {cols} from {t} where i>=$[r;0;n])}}"
 )
+# per-table collapse; must agree with OrderCache.apply
+AGG = {t: "0!select" for t in COLUMNS}
+AGG["target_state"] = "0!select max make"
 
 
 class OrderCache:
@@ -111,19 +116,18 @@ class KdbSource:
                                          timeout=10.0)
         return self._q
 
-    def _read_new(self, table: str, n: int) -> tuple[bool, pd.DataFrame]:
-        """(reset?, rows from position n onwards). Overridden in tests."""
-        q = INCREMENTAL_Q.format(t=table, cols=",".join(COLUMNS[table]))
-        res = self._handle()(q, n)
-        reset, rows = _split(res)
-        return bool(reset), _to_df(rows)
+    def _read_new(self, table: str, n: int) -> tuple[bool, int, pd.DataFrame]:
+        """(reset?, table row count, new rows collapsed per order). Overridden in tests."""
+        q = INCREMENTAL_Q.format(t=table, agg=AGG[table], cols=",".join(COLUMNS[table]))
+        reset, count, rows = _to_list(self._handle()(q, n))[:3]
+        return bool(reset), int(count), _to_df(rows)
 
     def sync(self, tables=TABLES):
         """Pull new rows for `tables` into the cache."""
         try:
             for table in tables:
                 try:
-                    reset, rows = self._read_new(table, self.seen[table])
+                    reset, count, rows = self._read_new(table, self.seen[table])
                 except Exception as e:   # missing table/column: degrade, don't die
                     if table == "target":
                         raise
@@ -135,8 +139,7 @@ class KdbSource:
                 if reset:
                     log.info("%s shrank (RDB reset?) -- reloading it", table)
                     self.cache.reset(table)
-                    self.seen[table] = 0
-                self.seen[table] += len(rows)
+                self.seen[table] = count
                 self.cache.apply(table, rows)
         except Exception:
             self.close()
