@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .sources import KdbSource, MockStreamSource, RealtimeSource
-from .profile import SYM_RE, MockVprof, VprofSource
+from .profile import SYM_RE, MockVprof, ProfileError, VprofSource, order_profile, region_now_minute
 from .transform import build_rows
 
 log = logging.getLogger("liveorders")
@@ -99,6 +99,8 @@ class Hub:
 
 hub = Hub(make_source())
 vprof = make_profile_source()
+# the clock the profile, the orders and qatt share; "now" for the fill marker
+REGION_TZ = os.getenv("REGION_TZ", "Asia/Hong_Kong")
 
 
 @asynccontextmanager
@@ -132,6 +134,26 @@ def volume_profile(sym: str):
         log.warning("profile for %s failed: %s", sym, e)
         return JSONResponse({"ok": False, "sym": sym, "source": vprof.label,
                              "error": f"{type(e).__name__}: {e}"}, status_code=502)
+
+
+@app.get("/api/order_profile")
+def order_volume_profile(sym: str, start: int, end: int, open: int = 1, close: int = 1):
+    """The full-day profile cut to an order's window [start, end) (minutes, region
+    clock) and rescaled to 100% of the order. Reuses the cached full-day profile."""
+    if not SYM_RE.fullmatch(sym or ""):
+        return JSONResponse({"ok": False, "sym": sym, "error": "not a symbol"}, status_code=400)
+    try:
+        full = vprof.get(sym)
+    except Exception as e:
+        log.warning("profile for %s failed: %s", sym, e)
+        return JSONResponse({"ok": False, "sym": sym, "source": vprof.label,
+                             "error": f"{type(e).__name__}: {e}"}, status_code=502)
+    try:
+        out = order_profile(full, start, end, bool(open), bool(close))
+    except ProfileError as e:
+        return JSONResponse({"ok": False, "sym": sym, "source": vprof.label, "error": str(e)},
+                            status_code=422)
+    return {"ok": True, "source": vprof.label, "now_min": region_now_minute(REGION_TZ), **out}
 
 
 @app.websocket("/ws")

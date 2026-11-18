@@ -46,9 +46,11 @@ def test_build_rows_uses_latest_make_and_tolerates_missing_tables():
                                 algo="VWAP", beta=0.0, delta=0.0, t_start=pd.Timedelta("01:30:00"),
                                 t_end=pd.Timedelta("05:00:00"), trader="jdoe",
                                 basket="SILK_JP", fixmsg="9001=VWAP;9012=6=12")])
-    state = pd.DataFrame([dict(**key, make=100), dict(**key, make=250)])
+    state = pd.DataFrame([dict(**key, make=100, state="activated"),
+                          dict(**key, make=250, state="filled")])
     [row] = build_rows(target, state)
     assert row["pct_filled"] == 25.0
+    assert row["state"] == "filled"        # the latest target_state row
     assert row["limit"] is None            # 0 -> market order
     assert row["start"] == "01:30:00"
     assert row["flow_type"] == "Swap"
@@ -60,3 +62,18 @@ def test_mock_source_round_trips():
     rows = build_rows(**MockSource().fetch())
     assert len(rows) == 30
     assert all(r["amount_usd"] for r in rows)
+
+
+def test_state_is_none_when_target_state_has_no_state_column():
+    key = dict(id_server=1, id_target=8)
+    target = pd.DataFrame([dict(**key, sym="AAPL", side="buy", size=10, limit_price=0.0,
+                                algo="DMA", beta=0.0, delta=0.0, t_start=pd.Timedelta(0),
+                                t_end=pd.Timedelta(0), trader="x", basket="B", fixmsg="")])
+    [row] = build_rows(target, pd.DataFrame([dict(**key, make=1)]))
+    assert row["state"] is None
+
+
+def test_the_simulator_gives_orders_states():
+    rows = build_rows(**MockSource().fetch())
+    states = {r["state"] for r in rows}
+    assert "activated" in states and states <= {"activated", "filled", "cxl", "created", "rejected"}

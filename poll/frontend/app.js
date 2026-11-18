@@ -13,11 +13,15 @@ const fmtPct = (v) => (v == null ? DASH : `${+v.toFixed(2)}%`);
 const txt = (v) => (v == null || v === "" ? DASH : v);
 
 const FLOW_PILL = { Agency: "amber", Swap: "green" };
+// latest target_state.state; only `activated` is shown unless "Show all states" is ticked
+const ACTIVE_STATE = "activated";
+const STATE_PILL = { activated: "blue", filled: "green", done: "green", cxl: "grey", rejected: "red" };
 
 // [key, header, render, numeric?, advanced?]  advanced columns show only when
 // "Show advanced information" is ticked.
 const COLUMNS = [
   ["id_target", "ID", (r) => txt(r.id_target), true, true],
+  ["state", "State", (r) => (r.state ? html`<span class=${"pill " + (STATE_PILL[r.state] || "grey")}>${r.state}</span>` : DASH), false, true],
   ["sym", "Symbol", (r) => html`<b>${r.sym}</b>`],
   ["side", "Side", (r) => html`<span class=${"side-" + r.side}>${txt(r.side)}</span>`],
   ["limit", "Limit", (r) => (r.limit == null ? html`<span class="pill grey">MKT</span>` : fmtNum(r.limit, 2)), true],
@@ -78,9 +82,12 @@ function App() {
   const { rows, status, changed, wsUp } = useLiveOrders();
   const [sort, setSort] = useState({ key: "amount_usd", dir: -1 });
   const [query, setQuery] = useState("");
-  const [hideDone, setHideDone] = useState(true);
-  const [selected, setSelected] = useState(null);   // the order whose modal is open
-  const closeModal = useCallback(() => setSelected(null), []);
+  const [allStates, setAllStates] = useState(false);   // off: activated orders only
+  // the order whose modal is open, by key, so the modal follows its live updates (fills)
+  const [selectedKey, setSelectedKey] = useState(null);
+  const openOrder = useCallback((r) => setSelectedKey(r.key), []);
+  const closeModal = useCallback(() => setSelectedKey(null), []);
+  const selected = selectedKey ? rows[selectedKey] : null;
   const [advanced, setAdvanced] = useState(() => {
     try { return localStorage.getItem("advanced") === "1"; } catch { return false; }
   });
@@ -107,14 +114,21 @@ function App() {
   const dRows = useDeferredValue(rows);
   const dQuery = useDeferredValue(query);
   const dSort = useDeferredValue(sort);
-  const dHideDone = useDeferredValue(hideDone);
+  const dAllStates = useDeferredValue(allStates);
+
+  const { haveStates, activeCount } = useMemo(() => {
+    const all = Object.values(dRows);
+    return { haveStates: all.some((r) => r.state),
+             activeCount: all.filter((r) => r.state === ACTIVE_STATE).length };
+  }, [dRows]);
 
   const list = useMemo(() => {
     const q = dQuery.trim().toLowerCase();
     let out = Object.values(dRows);
-    if (dHideDone) out = out.filter((r) => !(r.pct_filled >= 100));
+    // If no order has a state (target_state unreadable), do not hide everything.
+    if (!dAllStates && haveStates) out = out.filter((r) => r.state === ACTIVE_STATE);
     if (q) out = out.filter((r) =>
-      [r.sym, r.client, r.strategy, r.market, r.flow_type, r.account, String(r.id_target)]
+      [r.sym, r.client, r.strategy, r.market, r.flow_type, r.account, r.state, String(r.id_target)]
         .some((v) => v && String(v).toLowerCase().includes(q)));
     const { key, dir } = dSort;
     return out.sort((a, b) => {
@@ -122,7 +136,7 @@ function App() {
       if (x == null) return 1; if (y == null) return -1;
       return (x < y ? -1 : x > y ? 1 : 0) * dir;
     });
-  }, [dRows, dSort, dQuery, dHideDone]);
+  }, [dRows, dSort, dQuery, dAllStates, haveStates]);
   const shown = list.length > MAX_ROWS ? list.slice(0, MAX_ROWS) : list;
 
 
@@ -134,14 +148,14 @@ function App() {
     <div class="card">
       <div class="head">
         <h1>Active orders</h1>
-        <span class="pill grey">${Object.keys(rows).length} orders</span>
+        <span class="pill grey" title="activated orders / all of today's orders">${activeCount} activated · ${Object.keys(rows).length} orders</span>
         ${status.mode ? html`<span class=${"pill " + (status.mode === "realtime" ? "green" : "blue")}>
           ${status.mode === "realtime" ? "Real-time" : "Polling"}</span>` : null}
         <div class="spacer"></div>
         <input type="search" placeholder="Filter symbol, client, strategy…" value=${query}
                onInput=${(e) => setQuery(e.target.value)} />
-        <label><input type="checkbox" checked=${hideDone} onChange=${(e) => setHideDone(e.target.checked)} />
-          Hide fully filled</label>
+        <label title="Off: only orders whose latest target_state is activated"><input type="checkbox" checked=${allStates} onChange=${(e) => setAllStates(e.target.checked)} />
+          Show all states</label>
         <label><input type="checkbox" checked=${advanced} onChange=${(e) => toggleAdvanced(e.target.checked)} />
           Show advanced information</label>
         <button class="theme-btn" onClick=${toggleTheme} title="Switch light / dark mode">
@@ -163,7 +177,7 @@ function App() {
           </tr></thead>
           <tbody>
             ${shown.map((r) => html`
-              <${Row} key=${r.key} r=${r} cols=${cols} stamp=${changed[r.key]} onOpen=${setSelected} />`)}
+              <${Row} key=${r.key} r=${r} cols=${cols} stamp=${changed[r.key]} onOpen=${openOrder} />`)}
           </tbody>
         </table>
         ${list.length === 0 ? html`<div class="empty">No orders.</div>` : null}

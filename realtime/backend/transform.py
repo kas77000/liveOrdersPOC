@@ -3,7 +3,7 @@
 Inputs (one frame per table, today's rows only):
     target        id_server,id_target,sym,side,size,limit_price,algo,beta,delta,
                   t_start,t_end,trader,basket,fixmsg
-    target_state  id_server,id_target,make            (time-ordered, many rows/order)
+    target_state  id_server,id_target,make,state      (time-ordered, many rows/order)
     target_client id_server,id_target,client
     target_stock  id_server,id_target,adjclose,orgclose,fxlast
 Any of the last three may be empty/missing columns; the blotter degrades to "—".
@@ -79,7 +79,7 @@ def build_rows(target, target_state=None, target_client=None, target_stock=None)
     if target is None or target.empty:
         return []
     t = target.groupby(KEY, as_index=False, sort=False).last()   # last amendment wins
-    t = t.merge(_last_by_key(target_state, ["make"]), on=KEY, how="left")
+    t = t.merge(_last_by_key(target_state, ["make", "state"]), on=KEY, how="left")
     t = t.merge(_last_by_key(target_client, ["client"]), on=KEY, how="left")
     t = t.merge(_last_by_key(target_stock, ["adjclose", "orgclose", "fxlast"]), on=KEY, how="left")
 
@@ -114,5 +114,9 @@ def build_rows(target, target_state=None, target_client=None, target_stock=None)
             "filled": make,
             "pct_filled": round(100.0 * make / size, 1) if size else None,
             "amount_usd": round(amount) if amount else None,
+            "state": str(g("state")) if g("state") is not None else None,   # latest target_state
+            # does the order take part in the auctions (null -> assume yes, as core-vp)
+            "doopen": None if g("doopen") is None else bool(g("doopen")),
+            "doclose": None if g("doclose") is None else bool(g("doclose")),
         })
     return rows

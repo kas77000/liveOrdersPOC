@@ -98,8 +98,8 @@ Health, Due and Status are not shown for now. I found no source for Due in the t
 
 ## Volume profile (order modal)
 
-Clicking a row opens the order's modal; its **Volume Profile** tab shows the symbol's
-whole-day profile, built the way ai3's `getsymprof` (`getVolumeProfileReport.q`) does.
+Clicking a row opens the order's modal. Its **Full Day Volume Profile** tab shows the
+symbol's whole-day profile, built the way ai3's `getsymprof` (`getVolumeProfileReport.q`) does.
 
 The gateway (`get_data_by_date[`profile;`date`sym`vmed`time;d;d;`sym]`; it rejects `cc0`) returns
 header rows - `time=0` ADV (continuous volume only), `1` open auction, `2` close
@@ -116,3 +116,24 @@ The profile dated D is built at D's end of day for the next trading day, so the
 previous business day is asked for first, then further back (up to 5 business days)
 when a day is empty or q errors; the date used is shown in the modal. Times are on the region clock, as in the data.
 Same logic as experiment6/core-vp's `final_profile`.
+
+### Order Volume Profile tab
+
+The full-day profile cut to the order's window and rescaled to 100% of the ORDER - what
+ai3's `CustomProfile.toMap` does for the live algo: `v12 = cp(end) - cp(start)` is the
+share of the day's volume inside the window, and the order's schedule is the day's curve
+between start and end, rescaled to run 0 -> 100%.
+
+- Start / end default to `t_start` / `t_end` and can be edited (24h, region clock);
+  "Reset to order" restores them.
+- A bucket cut by the window keeps only the part it overlaps (linear, as q's `interp`).
+- The open auction counts when the window covers the open and `target.doopen` is set
+  (ai3's `includeOpen`); the close likewise with `doclose`; the PM auction when the
+  window spans the lunch reopen. The two checkboxes default to the order's flags.
+- Cards: the window, `v12`, expected market volume (`v12 x vtot`), order size over that
+  volume (the participation it implies), and expected-by-now vs filled.
+- The chart marks "now" (on `REGION_TZ`, default Asia/Hong_Kong): the expected progress
+  on the curve, and the order's actual fill (`make / size`), live.
+
+`toMap` weights its start point with the end time and vice versa; that looks like a
+swapped argument and is deliberately not reproduced.

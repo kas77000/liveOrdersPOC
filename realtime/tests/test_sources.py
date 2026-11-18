@@ -31,11 +31,12 @@ class FakeRdb(KdbSource):
 
 def test_incremental_q_takes_new_rows_collapsed_per_order():
     q = INCREMENTAL_Q.format(t="target_state", agg=AGG["target_state"],
-                             cols="id_server,id_target,make")
+                             cols="id_server,id_target,make,state")
     assert q == ("{[n] lqCnt:count target_state; lqRst:lqCnt<n; lqBeg:$[lqRst;0;n]; "
-                 "lqTbl:(lqBeg; lqCnt-lqBeg) sublist select id_server,id_target,make "
+                 "lqTbl:(lqBeg; lqCnt-lqBeg) sublist select id_server,id_target,make,state "
                  "from target_state; "
-                 "lqTbl:0!select make:max make by id_server,id_target from lqTbl; "
+                 "lqTbl:0!select make:max make,state:last state by id_server,id_target "
+                 "from lqTbl; "
                  "(lqRst; lqCnt; lqTbl)}")
     assert AGG["target"].startswith("sym:last sym,side:last side")   # last row, like OrderCache
 
@@ -108,3 +109,13 @@ def test_mock_stream_wakes_on_ticks():
         assert src.fetch()["target_state"]["make"].sum() > before
     finally:
         src.close()
+
+
+def test_cache_keeps_the_latest_state_and_the_max_make():
+    """state is the LATEST target_state row (as kdb-queries' `last state`); make
+    stays the max, so a stale replay cannot move the fill backwards."""
+    c = OrderCache()
+    c.apply("target_state", pd.DataFrame([dict(id_server=1, id_target=1, make=50, state="activated")]))
+    c.apply("target_state", pd.DataFrame([dict(id_server=1, id_target=1, make=50, state="cxl")]))
+    row = c.frames()["target_state"].iloc[0]
+    assert row["state"] == "cxl" and row["make"] == 50

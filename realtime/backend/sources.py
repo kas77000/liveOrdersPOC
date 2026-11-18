@@ -23,8 +23,8 @@ KEY = ["id_server", "id_target"]
 # Only the columns the blotter needs -- target_stock alone has 94.
 COLUMNS = {
     "target": ["id_server", "id_target", "sym", "side", "size", "limit_price", "algo", "beta",
-               "delta", "t_start", "t_end", "trader", "basket", "fixmsg"],
-    "target_state": ["id_server", "id_target", "make"],
+               "delta", "t_start", "t_end", "trader", "basket", "fixmsg", "doopen", "doclose"],
+    "target_state": ["id_server", "id_target", "make", "state"],
     "target_client": ["id_server", "id_target", "client"],
     "target_stock": ["id_server", "id_target", "adjclose", "orgclose", "fxlast"],
 }
@@ -48,9 +48,10 @@ INCREMENTAL_Q = (
 
 
 def _agg(table: str) -> str:
-    """Per-table collapse; must agree with OrderCache.apply (max make, else last)."""
-    fn = "max" if table == "target_state" else "last"
-    return ",".join(f"{c}:{fn} {c}" for c in COLUMNS[table] if c not in KEY)
+    """Per-table collapse; must agree with OrderCache.apply: make is the max (a
+    cumulative fill), everything else - target_state.state included - the last row."""
+    return ",".join(f"{c}:{'max' if c == 'make' else 'last'} {c}"
+                    for c in COLUMNS[table] if c not in KEY)
 
 
 AGG = {t: _agg(t) for t in COLUMNS}
@@ -77,7 +78,11 @@ class OrderCache:
             if table == "target_state":
                 # make is a cumulative fill: max is order-independent, so a late or
                 # replayed row can never move an order backwards.
-                both = both.groupby(KEY, as_index=False, sort=False)["make"].max()
+                # state is the LATEST row (rows arrive in time order), as the
+                # kdb-queries scripts read it: `select state:last state by ...`.
+                agg = {c: ("max" if c == "make" else "last")
+                       for c in ("make", "state") if c in both.columns}
+                both = both.groupby(KEY, as_index=False, sort=False).agg(agg)
             else:
                 both = both.groupby(KEY, as_index=False, sort=False).last()
             self._frames[table] = both
@@ -319,21 +324,27 @@ class MockSource:
         algo, fixmsg = r.choice(_ALGOS)
         self.next_id += 1
         key = dict(id_server=r.choice([1, 2]), id_target=self.next_id)
-        start = pd.Timedelta(hours=r.choice([1, 2, 3, 9]), minutes=r.choice([0, 15, 30]))
+        # 09:30-11:15 or 13:00-14:45: inside the simulated profile's session, never at lunch
+        start = pd.Timedelta(minutes=r.choice(list(range(570, 690, 15)) + list(range(780, 900, 15))))
         self.target.append(dict(
             **key, sym=sym, side=r.choice(["buy", "sell"]),
             size=r.choice([500, 1000, 5000, 20000, 100000]),
             limit_price=0.0 if r.random() < 0.3 else round(px * r.uniform(0.97, 1.03), 2),
             algo=algo, beta=0.0, delta=0.0, t_start=start,
-            t_end=start + pd.Timedelta(hours=r.choice([2, 4, 6])),
+            t_end=min(start + pd.Timedelta(hours=r.choice([1, 2, 4, 7])), pd.Timedelta(minutes=960)),
+            doopen=int(r.random() < 0.8), doclose=int(r.random() < 0.8),
             trader=r.choice(["jdoe", "kwong", "msato"]),
             basket=r.choice(["SILK_KR01", "BASK_A", "BASK7", "SILKAP"]), fixmsg=fixmsg))
         self.client.append(dict(**key, client=r.choice(_CLIENTS)))
         self.stock.append(dict(**key, adjclose=px, orgclose=px, fxlast=fx))
-        self.state.append(dict(**key, make=0, live=r.random() > 0.08))
+        live = r.random() > 0.2   # ~1 in 5 simulated orders is not working
+        self.state.append(dict(**key, make=0, live=live,
+                               state="activated" if live else r.choice(["cxl", "created", "rejected"])))
 
     def _fill(self, s, t):
         s["make"] = min(t["size"], s["make"] + max(1, int(t["size"] * self.rng.uniform(0.01, 0.06))))
+        if s["make"] >= t["size"]:
+            s["state"] = "filled"
 
     def step(self):
         """One second of market activity."""

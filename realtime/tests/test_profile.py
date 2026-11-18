@@ -186,3 +186,80 @@ def test_mock_profile_is_a_valid_day():
 def test_anything_but_a_ticker_never_reaches_q(bad):
     with pytest.raises(ProfileError, match="not a symbol"):
         profile_query(bad, dt.date(2026, 11, 18))
+
+
+# ---------------------------------------------------------------- order window
+from backend.profile import order_profile  # noqa: E402
+
+FULL_JP = build(JP_RAW, "7203.JP", dt.date(2026, 9, 3))      # 480..630 | 690..865
+
+
+def _cum_at(full, m):
+    """The day's running total at minute m: whole bars before m, plus the part of a
+    continuous bar that m cuts (auctions count at their bar's end)."""
+    tot = 0.0
+    for r in full["rows"]:
+        if r["end"] <= m:
+            tot += r["share"]
+        elif r["start"] < m and r["phase"] == "continuous":
+            tot += r["share"] * (m - r["start"]) / (r["end"] - r["start"])
+    return tot
+
+
+def test_the_whole_session_with_both_auctions_is_the_full_day():
+    o = order_profile(FULL_JP, 480, 865)
+    assert o["v12"] == pytest.approx(1.0)
+    assert o["open_included"] and o["close_included"]
+    assert [r["share"] for r in o["rows"]] == pytest.approx([r["share"] for r in FULL_JP["rows"]])
+
+
+def test_the_order_profile_runs_to_100_percent_of_the_order():
+    o = order_profile(FULL_JP, 505, 790)
+    assert sum(r["share"] for r in o["rows"]) == pytest.approx(1.0)
+    assert o["rows"][-1]["cum"] == pytest.approx(1.0)
+    assert o["rows"][0]["start"] == 505 and o["rows"][-1]["end"] == 790
+
+
+def test_v12_is_the_days_curve_read_at_start_and_end():
+    """ai3 CustomProfile: v12 = cp(end) - cp(start)."""
+    o = order_profile(FULL_JP, 505, 790, include_open=False, include_close=False)
+    assert o["v12"] == pytest.approx(_cum_at(FULL_JP, 790) - _cum_at(FULL_JP, 505))
+    assert o["expected_volume"] == pytest.approx(o["v12"] * FULL_JP["vtot"])
+
+
+def test_a_start_inside_a_bucket_takes_only_the_part_it_covers():
+    o = order_profile(FULL_JP, 505, 790)
+    day = {r["start"]: r["share"] for r in FULL_JP["rows"]}
+    first = o["rows"][0]
+    assert (first["start"], first["end"]) == (505, 510)
+    assert first["day_share"] == pytest.approx(day[500] / 2)
+
+
+def test_auctions_follow_the_window_and_the_order_flags():
+    mid = order_profile(FULL_JP, 505, 790)
+    assert not mid["open_included"] and not mid["close_included"]
+    no_flags = order_profile(FULL_JP, 480, 865, include_open=False, include_close=False)
+    assert not no_flags["open_included"] and not no_flags["close_included"]
+    assert no_flags["v12"] == pytest.approx(FULL_JP["adv"] / FULL_JP["vtot"] + FULL_JP["v_open_pm"] / FULL_JP["vtot"])
+
+
+def test_the_pm_auction_counts_only_when_the_window_spans_the_reopen():
+    assert any(r["phase"] == "pm auction" for r in order_profile(FULL_JP, 600, 700)["rows"])
+    assert not any(r["phase"] == "pm auction" for r in order_profile(FULL_JP, 480, 620)["rows"])
+    assert not any(r["phase"] == "pm auction" for r in order_profile(FULL_JP, 700, 800)["rows"])
+
+
+def test_bad_windows_are_refused_with_a_reason():
+    with pytest.raises(ProfileError, match="ends before"):
+        order_profile(FULL_JP, 700, 600)
+    with pytest.raises(ProfileError, match="misses the trading session"):
+        order_profile(FULL_JP, 100, 200)
+    with pytest.raises(ProfileError, match="misses"):
+        order_profile(FULL_JP, 640, 680)       # inside lunch only
+
+
+def test_a_window_that_never_reaches_the_open_or_close_takes_no_auction():
+    with pytest.raises(ProfileError, match="misses"):
+        order_profile(FULL_JP, 100, 470)                 # all before the 08:00 open
+    late = order_profile(FULL_JP, 700, 900)              # runs past the 14:25 close
+    assert late["close_included"] and not late["open_included"]

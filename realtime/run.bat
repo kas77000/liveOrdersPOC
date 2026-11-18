@@ -12,5 +12,7 @@ REM Volume profile (row click): the VPROF gateway. Leave empty for a simulated p
 REM set VPROF_HOST=your-vprof-gateway-host
 REM set VPROF_PORT=
 REM VPROF_USER / VPROF_PASS default to KDB_USER / KDB_PASS
+REM Region clock of the profile and order times ("now" in the order profile). Default Asia/Hong_Kong
+REM set REGION_TZ=Asia/Hong_Kong
 cd /d %~dp0
 ..\.venv\Scripts\python -m uvicorn backend.app:app --host 0.0.0.0 --port 8001

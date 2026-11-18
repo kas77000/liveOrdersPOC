@@ -172,6 +172,71 @@ def build(raw: pd.DataFrame, sym: str, date: dt.date) -> dict:
                 rows=final_profile(p))
 
 
+# --------------------------------------------------------------------------- order
+def order_profile(full: dict, start: int, end: int, include_open: bool = True,
+                  include_close: bool = True) -> dict:
+    """The full-day profile cut to an order's window and rescaled to 100% of the ORDER.
+
+    Same idea as ai3's CustomProfile.toMap (the live algo): read the day's cumulative
+    curve at the window's start and end; v12 = cp(end) - cp(start) is the share of the
+    day's volume the window holds, and the order's schedule is the curve between them
+    rescaled to run 0 -> 1. A bucket cut by the window keeps the overlapping part only
+    (linear inside the bucket, as q's interp). (toMap weights its start point with the
+    end time and vice versa; that looks like a swapped argument and is not copied.)
+
+    Auctions: the open counts when the window covers the open (starts at or before it
+    and ends after it) and the order does the open (ai3's includeOpen =
+    doOpenScheduler); the close likewise when the window covers the close; the PM reopen auction when the window spans the lunch reopen.
+
+    start / end are minutes on the region clock, like the profile.
+    """
+    if end <= start:
+        raise ProfileError("the window ends before it starts")
+    o, c, lunch = full["open_min"], full["close_min"], full["lunch"]
+    rows = []
+    for r in full["rows"]:
+        ph = r["phase"]
+        if ph == "open auction":
+            take = 1.0 if (include_open and start <= o < end) else 0.0   # window reaches the open
+            a, b = r["start"], r["end"]
+        elif ph == "close auction":
+            take = 1.0 if (include_close and start < c <= end) else 0.0  # ...the close
+            a, b = r["start"], r["end"]
+        elif ph == "pm auction":
+            take = 1.0 if (lunch and start <= lunch[1] < end) else 0.0
+            a, b = r["start"], r["end"]
+        else:
+            a, b = max(r["start"], start), min(r["end"], end)
+            take = (b - a) / (r["end"] - r["start"]) if b > a else 0.0
+        if take > 0 and r["share"] > 0:
+            rows.append(dict(start=a, end=b, label=r["label"] if ph != "continuous" else clock(a),
+                             phase=ph, day_share=r["share"] * take))
+    v12 = sum(r["day_share"] for r in rows)
+    if v12 <= 0:
+        raise ProfileError(f"no expected volume between {clock(start)} and {clock(end)} - "
+                           "the window misses the trading session")
+    total = 0.0
+    for r in rows:
+        r["share"] = r["day_share"] / v12
+        total += r["share"]
+        r["cum"] = total
+    return dict(sym=full["sym"], date=full["date"], start=start, end=end,
+                open_included=any(r["phase"] == "open auction" for r in rows),
+                close_included=any(r["phase"] == "close auction" for r in rows),
+                v12=v12, expected_volume=v12 * full["vtot"], vtot=full["vtot"],
+                open_min=o, close_min=c, lunch=lunch, rows=rows)
+
+
+def region_now_minute(tz_name: str = "Asia/Hong_Kong") -> float:
+    """Minutes of day on the region clock (the clock the profile and orders use)."""
+    try:
+        from zoneinfo import ZoneInfo
+        now = dt.datetime.now(ZoneInfo(tz_name))
+    except Exception:          # no tz database: the region clock is UTC+8
+        now = dt.datetime.utcnow() + dt.timedelta(hours=8)
+    return now.hour * 60 + now.minute + now.second / 60
+
+
 # --------------------------------------------------------------------------- sources
 def profile_query(sym: str, date: dt.date) -> str:
     """The gateway call as one string (the gateway refuses pykx's argument form).
