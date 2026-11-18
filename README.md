@@ -3,6 +3,10 @@
 Live blotter of the algo engine's parent orders, read from the OMS kdb+ database.
 Two self-contained versions, one per folder. They share only the Python environment.
 
+How the features compute their numbers, step by step next to the ai3 algo engine code
+they follow: [`docs/`](docs/README.md) (activated orders, Full Day Volume Profile,
+Order Volume Profile).
+
 | | `poll/` (port 8000) | `realtime/` (port 8001) |
 |---|---|---|
 | Data path | every second, reads **only the rows appended** to the RDB since the last read | subscribes to the **tickerplant** (`.u.sub`); starting snapshot from the RDB |
