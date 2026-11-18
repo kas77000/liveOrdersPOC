@@ -6,5 +6,9 @@ REM set KDB_PORT=5000
 REM set KDB_USER=
 REM set KDB_PASS=
 set POLL_SECONDS=1
+REM Volume profile (row click): the VPROF gateway. Leave empty for a simulated profile.
+REM set VPROF_HOST=your-vprof-gateway-host
+REM set VPROF_PORT=
+REM VPROF_USER / VPROF_PASS default to KDB_USER / KDB_PASS
 cd /d %~dp0
 ..\.venv\Scripts\python -m uvicorn backend.app:app --host 0.0.0.0 --port 8000

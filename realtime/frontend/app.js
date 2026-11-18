@@ -1,5 +1,5 @@
 // Live Orders blotter. React 18 + htm (JSX-like templates, no build step).
-const { memo, useDeferredValue, useEffect, useMemo, useRef, useState } = React;
+const { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } = React;
 
 // Rendering thousands of <tr> on every keystroke/poll is what made typing lag;
 // the table shows the top MAX_ROWS of the current sort/filter.
@@ -79,6 +79,8 @@ function App() {
   const [sort, setSort] = useState({ key: "amount_usd", dir: -1 });
   const [query, setQuery] = useState("");
   const [hideDone, setHideDone] = useState(true);
+  const [selected, setSelected] = useState(null);   // the order whose modal is open
+  const closeModal = useCallback(() => setSelected(null), []);
   const [advanced, setAdvanced] = useState(() => {
     try { return localStorage.getItem("advanced") === "1"; } catch { return false; }
   });
@@ -87,6 +89,16 @@ function App() {
     // don't stay sorted by a column that just disappeared
     if (!on) setSort((s) => (COLUMNS.find((c) => c[0] === s.key)?.[4] ? { key: "amount_usd", dir: -1 } : s));
     try { localStorage.setItem("advanced", on ? "1" : "0"); } catch {}
+  };
+  const [theme, setTheme] = useState(() => {
+    try { const t = localStorage.getItem("theme"); if (t) return t; } catch {}
+    return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  });
+  useEffect(() => { document.documentElement.dataset.theme = theme; }, [theme]);
+  const toggleTheme = () => {
+    const t = theme === "dark" ? "light" : "dark";
+    setTheme(t);
+    try { localStorage.setItem("theme", t); } catch {}
   };
   const cols = useMemo(() => COLUMNS.filter((c) => advanced || !c[4]), [advanced]);
 
@@ -118,6 +130,7 @@ function App() {
   const updated = status.updated ? new Date(status.updated * 1000).toLocaleTimeString() : "—";
 
   return html`
+    <div>
     <div class="card">
       <div class="head">
         <h1>Active orders</h1>
@@ -131,6 +144,8 @@ function App() {
           Hide fully filled</label>
         <label><input type="checkbox" checked=${advanced} onChange=${(e) => toggleAdvanced(e.target.checked)} />
           Show advanced information</label>
+        <button class="theme-btn" onClick=${toggleTheme} title="Switch light / dark mode">
+          ${theme === "dark" ? "☀ Light" : "☾ Dark"}</button>
         <div class="conn" title=${status.error || ""}>
           <span class=${"dot" + (ok ? " ok" : "")}></span>
           ${wsUp ? status.source : "disconnected"} · ${updated}
@@ -148,21 +163,24 @@ function App() {
           </tr></thead>
           <tbody>
             ${shown.map((r) => html`
-              <${Row} key=${r.key} r=${r} cols=${cols} stamp=${changed[r.key]} />`)}
+              <${Row} key=${r.key} r=${r} cols=${cols} stamp=${changed[r.key]} onOpen=${setSelected} />`)}
           </tbody>
         </table>
         ${list.length === 0 ? html`<div class="empty">No orders.</div>` : null}
         ${list.length > MAX_ROWS ? html`<div class="empty">Showing ${MAX_ROWS} of ${list.length} orders — refine the filter or change the sort.</div>` : null}
       </div>
+    </div>
+    ${selected ? html`<${window.OrderModal} order=${selected} onClose=${closeModal} />` : null}
     </div>`;
 }
 
 // Re-keying the <tr> by the change stamp restarts the CSS flash animation.
 // memo: rows whose data and stamp did not change are skipped on re-render (deltas
 // keep the same object for unchanged rows).
-const Row = memo(function Row({ r, cols, stamp }) {
+const Row = memo(function Row({ r, cols, stamp, onOpen }) {
   return html`
-    <tr key=${stamp || 0} class=${stamp && Date.now() - stamp < 1500 ? "flash" : ""}>
+    <tr key=${stamp || 0} class=${"clickable" + (stamp && Date.now() - stamp < 1500 ? " flash" : "")}
+        onClick=${() => onOpen(r)} title="Open order details">
       ${cols.map(([k, , render, num]) => html`<td key=${k} class=${num ? "num" : ""}>${render(r)}</td>`)}
     </tr>`;
 });

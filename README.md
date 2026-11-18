@@ -36,6 +36,7 @@ demoed anywhere. Both can run at the same time for comparison.
 - RDB: `KDB_HOST` / `KDB_PORT` of the OMS, plus `KDB_USER` / `KDB_PASS` if needed
 - Tickerplant (realtime only): `TP_HOST` / `TP_PORT`. Check it first with
   `.venv\Scripts\python realtime\scripts\check_tickerplant.py HOST PORT`
+- Volume profile (click a row): `VPROF_HOST` / `VPROF_PORT` of the VPROF gateway
 
 Tests, per folder: `cd poll` (or `cd realtime`), then `..\.venv\Scripts\python -m pytest -q`.
 
@@ -91,4 +92,26 @@ Health, Due and Status are not shown for now. I found no source for Due in the t
 - `backend/transform.py`: raw rows → blotter rows (pure, unit-tested)
 - `backend/fixmsg.py`: fixmsg / 9012 parsing and participation levels
 - `backend/app.py`: update loop, diff, WebSocket fan-out, static files
+- `backend/profile.py`: the volume profile for the row modal (gateway call, decode, final profile)
 - `frontend/app.js`: the table (sort, filter, row flash on change)
+- `frontend/profile.js`: the order modal and its Volume Profile tab (SVG chart)
+
+## Volume profile (order modal)
+
+Clicking a row opens the order's modal; its **Volume Profile** tab shows the symbol's
+whole-day profile, built the way ai3's `getsymprof` (`getVolumeProfileReport.q`) does.
+
+The gateway (`get_data_by_date[`profile;`date`sym`vmed`time`cc0;d;d;`sym]`) returns
+header rows - `time=0` ADV (continuous volume only), `1` open auction, `2` close
+auction, `3` PM reopen auction - then buckets whose `vmed` is the CUMULATIVE fraction
+of continuous volume. The auctions are not in that curve, so `final_profile`:
+
+1. interpolates the curve onto a 10-minute grid and takes the deltas;
+2. scales the buckets by `adv / vtot` and each auction by `1 / vtot`, with
+   `vtot = adv + open + close + PM` (getsymprof leaves PM out);
+3. lays the day out as OPEN, the buckets, PM at the lunch reopen, CLOSE, so the
+   shares sum to 100%.
+
+Today's profile is asked for first, then up to 5 business days back; an older date
+is shown in the modal. Times are on the region clock, as in the data.
+Same logic as experiment6/core-vp's `final_profile`.

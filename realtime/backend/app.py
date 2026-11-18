@@ -4,6 +4,8 @@ diffs the blotter, and pushes the changed rows to the browsers over a WebSocket.
     KDB_HOST / KDB_PORT / KDB_USER / KDB_PASS    OMS RDB, for the starting snapshot
     TP_HOST / TP_PORT                            tickerplant (either host unset -> simulated data)
     SWEEP_SECONDS                                RDB catch-up read period (default 10)
+    VPROF_HOST / VPROF_PORT                      VPROF gateway, for the volume profile
+                                                 modal (unset -> simulated profile)
 
 Run:  run.bat   then open http://localhost:8001
 """
@@ -17,9 +19,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .sources import KdbSource, MockStreamSource, RealtimeSource
+from .profile import SYM_RE, MockVprof, VprofSource
 from .transform import build_rows
 
 log = logging.getLogger("liveorders")
@@ -39,6 +43,15 @@ def make_source():
                     os.getenv("KDB_USER", ""), os.getenv("KDB_PASS", ""))
     return RealtimeSource(tp_host, int(os.getenv("TP_PORT", "5010")), rdb,
                           float(os.getenv("SWEEP_SECONDS", "10")))
+
+
+def make_profile_source():
+    host = os.getenv("VPROF_HOST")
+    if host:
+        return VprofSource(host, int(os.getenv("VPROF_PORT", "5000")),
+                           os.getenv("VPROF_USER", os.getenv("KDB_USER", "")),
+                           os.getenv("VPROF_PASS", os.getenv("KDB_PASS", "")))
+    return MockVprof()
 
 
 class Hub:
@@ -85,6 +98,7 @@ class Hub:
 
 
 hub = Hub(make_source())
+vprof = make_profile_source()
 
 
 @asynccontextmanager
@@ -94,6 +108,7 @@ async def lifespan(_app):
     yield
     task.cancel()
     hub.source.close()
+    vprof.close()
 
 
 app = FastAPI(title="Live Orders POC", lifespan=lifespan)
@@ -102,6 +117,21 @@ app = FastAPI(title="Live Orders POC", lifespan=lifespan)
 @app.get("/api/orders")
 def orders():
     return hub.snapshot()
+
+
+@app.get("/api/profile")
+def volume_profile(sym: str):
+    """The symbol's whole-day volume profile, auctions included (see profile.py).
+    Plain def: FastAPI runs it in a worker thread, so a slow gateway never blocks
+    the blotter."""
+    if not SYM_RE.fullmatch(sym or ""):
+        return JSONResponse({"ok": False, "sym": sym, "error": "not a symbol"}, status_code=400)
+    try:
+        return {"ok": True, "source": vprof.label, **vprof.get(sym)}
+    except Exception as e:
+        log.warning("profile for %s failed: %s", sym, e)
+        return JSONResponse({"ok": False, "sym": sym, "source": vprof.label,
+                             "error": f"{type(e).__name__}: {e}"}, status_code=502)
 
 
 @app.websocket("/ws")
