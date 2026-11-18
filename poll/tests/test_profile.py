@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from backend.profile import (MockVprof, ProfileError, VprofSource, build, decode,
-                             final_profile, profile_query)
+                             final_profile, previous_business_day, profile_query)
 
 HEAD = [(0, 105156029.0), (1, 445700.0), (2, 799800.0), (3, 2000.0)]
 PRE = [(540, 0.0), (550, 0.0), (560, 0.0), (565, 0.0), (568, 0.0), (569, 0.0)]
@@ -99,27 +99,81 @@ def test_bad_rows_raise_a_readable_error():
         decode(pd.DataFrame(columns=["time", "vmed"]))
 
 
-def test_gateway_call_is_one_string():
-    assert profile_query("7203.JP", dt.date(2026, 11, 18)) == (
-        "get_data_by_date[`profile;`date`sym`vmed`time`cc0;2026.11.18;2026.11.18;`7203.JP]")
+def test_gateway_call_is_one_string_without_cc0():
+    """The OMS VPROF gateway rejects cc0; this is the call checked by hand."""
+    assert profile_query("402340.KS", dt.date(2026, 11, 17)) == (
+        "get_data_by_date[`profile;`date`sym`vmed`time;2026.11.17;2026.11.17;`402340.KS]")
 
 
-def test_source_falls_back_to_the_last_day_with_a_profile():
-    class Fake(VprofSource):
-        def __init__(self):
-            super().__init__("fake", 0)
-            self.asked = []
+class QError(Exception):
+    """Stands in for pykx.exceptions.QError (matched by class name)."""
 
-        def _rows(self, sym, date):
-            self.asked.append(date)
-            return _raw(JP_HEAD, JP_PRE + JP_BODY) if len(self.asked) == 3 else pd.DataFrame()
 
-    src = Fake()
-    out = src.get("7203.JP", today=dt.date(2026, 11, 16))       # a Monday
-    assert src.asked == [dt.date(2026, 11, 16), dt.date(2026, 11, 13), dt.date(2026, 11, 12)]
-    assert out["date"] == "2026-11-12"
-    src.get("7203.JP", today=dt.date(2026, 11, 16))
-    assert len(src.asked) == 3                                  # cached
+class Fake(VprofSource):
+    def __init__(self, answers):
+        super().__init__("fake", 0)
+        self.answers, self.asked = answers, []
+
+    def _rows(self, sym, date):
+        self.asked.append(date)
+        a = self.answers.get(date, pd.DataFrame())
+        if isinstance(a, Exception):
+            raise a
+        return a
+
+
+JP_RAW = _raw(JP_HEAD, JP_PRE + JP_BODY)
+
+
+def test_reads_the_previous_business_day_first():
+    src = Fake({dt.date(2026, 11, 17): JP_RAW})
+    out = src.get("7203.JP", today=dt.date(2026, 11, 18))
+    assert src.asked == [dt.date(2026, 11, 17)]
+    assert out["date"] == "2026-11-17"
+    src.get("7203.JP", today=dt.date(2026, 11, 18))
+    assert len(src.asked) == 1                                  # cached
+
+
+def test_monday_reads_friday_and_skips_empty_or_failing_days():
+    src = Fake({dt.date(2026, 11, 13): QError("holiday"),     # Friday: a q error
+                dt.date(2026, 11, 11): JP_RAW})                 # 12th: empty
+    out = src.get("7203.JP", today=dt.date(2026, 11, 16))      # a Monday
+    assert src.asked == [dt.date(2026, 11, 13), dt.date(2026, 11, 12),
+                         dt.date(2026, 11, 11)]
+    assert out["date"] == "2026-11-11"
+
+
+def test_a_connection_failure_stops_at_once():
+    src = Fake({dt.date(2026, 11, 17): ConnectionRefusedError("down")})
+    with pytest.raises(ConnectionRefusedError):
+        src.get("7203.JP", today=dt.date(2026, 11, 18))
+    assert len(src.asked) == 1
+
+
+def test_nothing_in_the_lookback_says_so_with_the_q_errors():
+    src = Fake({dt.date(2026, 11, 17): QError("type")})
+    with pytest.raises(ProfileError, match="5 business days.*type"):
+        src.get("7203.JP", today=dt.date(2026, 11, 18))
+    assert len(src.asked) == 5
+
+
+def test_a_korean_profile_like_the_gateway_returned_decodes():
+    """402340.KS on 2026.11.17: header and first rows as read off the gateway (tail
+    extended to the close). No lunch break, PM auction 0."""
+    head = [(0, 595283.0), (1, 8301.0), (2, 49331.0), (3, 0.0)]
+    pre = [(450, 0.0), (460, 0.0), (470, 0.0), (475, 0.0), (478, 0.0), (479, 0.0),
+           (480, 0.0)]
+    seen = [(481, 0.0181334), (482, 0.0314832), (490, 0.10586), (500, 0.169977),
+            (510, 0.214949), (520, 0.254571), (530, 0.292069)]
+    tail = [(m, 0.292069 + (1 - 0.292069) * (k + 1) / 38)
+            for k, m in enumerate(range(540, 920, 10))]
+    out = build(_raw(head, pre + seen + tail), "402340.KS", dt.date(2026, 11, 17))
+    assert out["lunch"] is None and out["open_min"] == 480
+    rows = out["rows"]
+    assert [rows[0]["label"], rows[-1]["label"]] == ["OPEN", "CLOSE"]
+    assert not any(r["phase"] == "pm auction" for r in rows)
+    assert sum(r["share"] for r in rows) == pytest.approx(1.0)
+    assert rows[0]["share"] == pytest.approx(8301 / (595283 + 8301 + 49331))
 
 
 def test_mock_profile_is_a_valid_day():

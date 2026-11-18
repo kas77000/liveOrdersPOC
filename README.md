@@ -101,7 +101,7 @@ Health, Due and Status are not shown for now. I found no source for Due in the t
 Clicking a row opens the order's modal; its **Volume Profile** tab shows the symbol's
 whole-day profile, built the way ai3's `getsymprof` (`getVolumeProfileReport.q`) does.
 
-The gateway (`get_data_by_date[`profile;`date`sym`vmed`time`cc0;d;d;`sym]`) returns
+The gateway (`get_data_by_date[`profile;`date`sym`vmed`time;d;d;`sym]`; it rejects `cc0`) returns
 header rows - `time=0` ADV (continuous volume only), `1` open auction, `2` close
 auction, `3` PM reopen auction - then buckets whose `vmed` is the CUMULATIVE fraction
 of continuous volume. The auctions are not in that curve, so `final_profile`:
@@ -112,6 +112,7 @@ of continuous volume. The auctions are not in that curve, so `final_profile`:
 3. lays the day out as OPEN, the buckets, PM at the lunch reopen, CLOSE, so the
    shares sum to 100%.
 
-Today's profile is asked for first, then up to 5 business days back; an older date
-is shown in the modal. Times are on the region clock, as in the data.
+The profile dated D is built at D's end of day for the next trading day, so the
+previous business day is asked for first, then further back (up to 5 business days)
+when a day is empty or q errors; the date used is shown in the modal. Times are on the region clock, as in the data.
 Same logic as experiment6/core-vp's `final_profile`.

@@ -143,7 +143,6 @@
 
     const p = state.data;
     const auctions = p.rows.filter((r) => r.phase !== "continuous").reduce((a, r) => a + r.share, 0);
-    const today = new Date().toISOString().slice(0, 10);
     const kpis = [
       ["ADV (continuous)", compact(p.adv), `${qty(p.adv)} shares`],
       ["Open auction", compact(p.v_open), `${qty(p.v_open)} shares · ${pct(p.v_open / p.vtot)} of the day`],
@@ -158,7 +157,7 @@
         </div>
         <${ProfileChart} p=${p} />
         <div class="vp-foot muted">
-          ${p.date !== today ? html`<b>Profile of ${p.date}</b> (latest available) · ` : null}
+          Profile dated <b>${p.date}</b> · 
           Times on the region clock · ${p.source}
         </div>
       </div>`;

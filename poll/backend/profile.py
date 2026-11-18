@@ -15,7 +15,7 @@ interpolate the curve onto a 10-minute grid, scale the buckets by adv / vtot, an
 put OPEN / PM / CLOSE around them at auction / vtot. vtot includes the PM auction
 (getsymprof omits it and lunch-break days total slightly over 1).
 
-    VprofSource   the gateway: get_data_by_date[`profile;...] for today
+    VprofSource   the gateway: get_data_by_date[`profile;...], previous business day
     MockVprof     a plausible profile, for running without kdb
     final_profile the transformation; pure, unit-tested
 """
@@ -173,21 +173,38 @@ def build(raw: pd.DataFrame, sym: str, date: dt.date) -> dict:
 
 
 # --------------------------------------------------------------------------- sources
-def profile_query(sym: str, date: dt.date, with_cc0: bool = True) -> str:
+def profile_query(sym: str, date: dt.date) -> str:
     """The gateway call as one string (the gateway refuses pykx's argument form).
-    `profile` is the gateway's dataset alias, not a table name."""
+    `profile` is the gateway's dataset alias, not a table name. No cc0: the OMS
+    VPROF gateway rejects that column (the header skip is derived instead)."""
     if not SYM_RE.fullmatch(sym or ""):
         # sym is spliced into q source: anything but a ticker is refused outright
         raise ProfileError(f"not a symbol: {sym!r}")
-    cols = "`date`sym`vmed`time" + ("`cc0" if with_cc0 else "")
     day = f"{date:%Y.%m.%d}"
-    return f"get_data_by_date[`profile;{cols};{day};{day};`{sym}]"
+    return f"get_data_by_date[`profile;`date`sym`vmed`time;{day};{day};`{sym}]"
+
+
+def previous_business_day(d: dt.date) -> dt.date:
+    d -= dt.timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= dt.timedelta(days=1)
+    return d
+
+
+def _is_q_error(e: Exception) -> bool:
+    """An error q raised (pykx QError) - as opposed to a connection failure."""
+    return type(e).__name__ == "QError"
 
 
 class VprofSource:
-    """The VPROF gateway. Today's profile, falling back up to LOOKBACK business days
-    when today's is not there yet. One handle, serialised, reopened on failure;
-    results cached per symbol and day."""
+    """The VPROF gateway.
+
+    The profile dated D is built at D's end of day for trading on the next day, so
+    today's blotter reads the PREVIOUS business day's profile (checked by hand on the
+    gateway). When that day has nothing (a holiday, or a q error for it) it goes back
+    further, up to LOOKBACK business days; a connection failure stops at once.
+    One handle, serialised, reopened on failure; cached per symbol and day.
+    """
 
     LOOKBACK = 5
 
@@ -210,12 +227,7 @@ class VprofSource:
         return self._q
 
     def _rows(self, sym: str, date: dt.date) -> pd.DataFrame:
-        try:
-            res = self._handle()(profile_query(sym, date, with_cc0=True))
-        except Exception as e:
-            if "cc0" not in str(e):      # only retry when the column is the complaint
-                raise
-            res = self._handle()(profile_query(sym, date, with_cc0=False))
+        res = self._handle()(profile_query(sym, date))
         try:
             return res.pd()
         except Exception:
@@ -229,23 +241,24 @@ class VprofSource:
         if (sym, today) in self._cache:
             return self._cache[(sym, today)]
         with self._lock:
-            d, tried = today, 0
-            while True:
+            d, errors = previous_business_day(today), []
+            for _ in range(self.LOOKBACK):
                 try:
                     raw = self._rows(sym, d)
-                except Exception:
-                    self.close()
-                    raise
-                if len(raw):
+                except Exception as e:
+                    if not _is_q_error(e):
+                        self.close()
+                        raise
+                    errors.append(f"{d}: {e}")
+                    raw = None
+                if raw is not None and len(raw):
                     out = build(raw, sym, d)
                     break
-                tried += 1
-                if tried > self.LOOKBACK:
-                    raise ProfileError(f"no profile for {sym} on {today} or the "
-                                       f"{self.LOOKBACK} business days before")
-                d -= dt.timedelta(days=1)
-                while d.weekday() >= 5:
-                    d -= dt.timedelta(days=1)
+                d = previous_business_day(d)
+            else:
+                detail = f" (q errors: {'; '.join(errors)})" if errors else ""
+                raise ProfileError(f"no profile for {sym} in the {self.LOOKBACK} business "
+                                   f"days before {today}{detail}")
         self._cache[(sym, today)] = out
         return out
 
