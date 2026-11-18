@@ -41,6 +41,8 @@
            `Q${x + w},${yTop} ${x + w},${yTop + r}V${yBase}Z`;
   }
 
+  const AUCTION_NAME = { OPEN: "Open", PM: "PM", CLOSE: "Close" };
+
   // centred on the bar, but opening inward near either edge so it never leaves the chart
   function tipStyle(f) {
     const shift = f > 0.8 ? "-100%" : f < 0.2 ? "0%" : "-50%";
@@ -51,13 +53,16 @@
     const [hover, setHover] = useState(null);
     const rows = p.rows;
     const geo = useMemo(() => {
-      const t0 = rows[0].start, t1 = rows[rows.length - 1].end;
+      // a margin either side so the OPEN / CLOSE bars and labels clear the axes
+      const PAD = 12;   // minutes
+      const tA = rows[0].start, tB = rows[rows.length - 1].end;
+      const t0 = tA - PAD, t1 = tB + PAD;
       const x = (m) => L + ((m - t0) / (t1 - t0)) * (W - L - R);
       const yMax = niceMax(Math.max(...rows.map((r) => r.share)) * 1.08);
       const yc = (v) => TOP.y1 - v * (TOP.y1 - TOP.y0);
       const yb = (v) => BOT.y1 - (v / yMax) * (BOT.y1 - BOT.y0);
       // step-accurate running total: flat until a bucket starts, rising across it
-      let line = `M${x(t0)},${yc(0)}`, prev = 0;
+      let line = `M${x(tA)},${yc(0)}`, prev = 0;
       for (const r of rows) line += `L${x(r.start)},${yc(prev)}L${x(r.end)},${yc(r.cum)}`, (prev = r.cum);
       const hours = [];
       for (let m = Math.ceil(t0 / 60) * 60; m <= t1; m += 60) hours.push(m);
@@ -100,14 +105,13 @@
                               class=${"vp-bar " + (auction ? "auct" : "cont") + (hover === i ? " on" : "")} />`;
           })}
           ${rows.filter((r) => r.phase !== "continuous").map((r) => html`
-            <text key=${"l" + r.label} class="vp-label" y=${yb(r.share) - 5}
-                  x=${r.label === "OPEN" ? x(r.start) + 1 : r.label === "CLOSE" ? x(r.end) - 1 : (x(r.start) + x(r.end)) / 2}
-                  text-anchor=${r.label === "OPEN" ? "start" : r.label === "CLOSE" ? "end" : "middle"}>${r.label}</text>`)}
+            <text key=${"l" + r.label} class="vp-label" y=${yb(r.share) - 8}
+                  x=${(x(r.start) + x(r.end)) / 2} text-anchor="middle">${AUCTION_NAME[r.label] || r.label}</text>`)}
 
           ${geo.hours.map((m) => html`
             <text key=${"x" + m} class="vp-tick" x=${x(m)} y=${H - 8} text-anchor="middle">${clock(m)}</text>`)}
 
-          ${h ? html`<line class="vp-cross" x1=${(x(h.start) + x(h.end)) / 2} x2=${(x(h.start) + x(h.end)) / 2}
+          ${h ? html`<line class="vp-cross" x1=${x(h.end)} x2=${x(h.end)}
                            y1=${TOP.y0} y2=${BOT.y1} />
                      <circle class="vp-dot" cx=${x(h.end)} cy=${yc(h.cum)} r="4" />` : null}
           ${rows.map((r, i) => html`
@@ -115,10 +119,10 @@
                   height=${BOT.y1 - TOP.y0} onMouseEnter=${() => setHover(i)} />`)}
         </svg>
         ${h ? html`
-          <div class="vp-tip" style=${tipStyle(((x(h.start) + x(h.end)) / 2) / W)}>
+          <div class="vp-tip" style=${tipStyle(x(h.end) / W)}>
             <b>${h.phase === "continuous" ? `${clock(h.start)}–${clock(h.end)}` : `${h.label} auction`}</b>
             <div>${pct(h.share, 2)} of the day · ${compact(h.share * p.vtot)} sh</div>
-            <div class="muted">running total ${pct(h.cum, 1)}</div>
+            <div class="muted">running total at ${clock(h.end)}: ${pct(h.cum, 1)}</div>
           </div>` : null}
       </div>`;
   }
