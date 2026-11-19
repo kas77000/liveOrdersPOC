@@ -298,7 +298,7 @@ _SYMS = [("005930.KS", 71000, 0.00072), ("000660.KS", 182000, 0.00072),
          ("BHP.AU", 44, 0.66), ("AAPL", 228, 1.0), ("MSFT", 415, 1.0), ("NVDA", 140, 1.0)]
 _CLIENTS = ["Cobalt Funds", "Eastgate Fund", "Bright Pension", "Delta Asset Mgmt",
             "Aurora Capital", "Northwind Partners"]
-_ALGOS = [("VWAP", "9001=VWAP;9012=5=3^6=12"), ("PART", "9001=PART;9012=7=10"),
+_ALGOS = [("VWAP", "9001=VWAP;9012=5=3^6=12^148=0.5,0.3"), ("VWAP", "9001=VWAP;9012=148=-0.4,0.25,1"), ("PART", "9001=PART;9012=7=10"),
           ("LINE", "9001=LINE;9012=5=4^6=12^15=1"),
           ("NINJA", "9001=NINJA;9012=6=20"), ("SHADOW", "9001=SHADOW;9012=5=2"),
           ("TMX", "9001=TMX;9012=92=A,5^6=8"), ("DMA", "9001=DMA"),

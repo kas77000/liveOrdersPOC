@@ -23,7 +23,8 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .sources import KdbSource, MockStreamSource, RealtimeSource
-from .profile import SYM_RE, MockVprof, ProfileError, VprofSource, order_profile, region_now_minute
+from .profile import (SYM_RE, MockVprof, ProfileError, VprofSource, order_profile,
+                      region_now_minute, tilt_full_day, tilt_order_profile)
 from .transform import build_rows
 
 log = logging.getLogger("liveorders")
@@ -122,14 +123,18 @@ def orders():
 
 
 @app.get("/api/profile")
-def volume_profile(sym: str):
+def volume_profile(sym: str, alpha: float | None = None, beta: float | None = None, mode: int = 0):
     """The symbol's whole-day volume profile, auctions included (see profile.py).
+    alpha / beta / mode: the tag-148 tilt, as if an order ran from the open to the close.
     Plain def: FastAPI runs it in a worker thread, so a slow gateway never blocks
     the blotter."""
     if not SYM_RE.fullmatch(sym or ""):
         return JSONResponse({"ok": False, "sym": sym, "error": "not a symbol"}, status_code=400)
     try:
-        return {"ok": True, "source": vprof.label, **vprof.get(sym)}
+        full = vprof.get(sym)
+        if alpha is not None and beta is not None:
+            full = tilt_full_day(full, alpha, beta, mode)
+        return {"ok": True, "source": vprof.label, **full}
     except Exception as e:
         log.warning("profile for %s failed: %s", sym, e)
         return JSONResponse({"ok": False, "sym": sym, "source": vprof.label,
@@ -137,9 +142,11 @@ def volume_profile(sym: str):
 
 
 @app.get("/api/order_profile")
-def order_volume_profile(sym: str, start: int, end: int, open: int = 1, close: int = 1):
+def order_volume_profile(sym: str, start: int, end: int, open: int = 1, close: int = 1,
+                         alpha: float | None = None, beta: float | None = None, mode: int = 0):
     """The full-day profile cut to an order's window [start, end) (minutes, region
-    clock) and rescaled to 100% of the order. Reuses the cached full-day profile."""
+    clock) and rescaled to 100% of the order. Reuses the cached full-day profile.
+    alpha / beta / mode: the tag-148 tilt, replayed as ai3's ProfileSnapshot does."""
     if not SYM_RE.fullmatch(sym or ""):
         return JSONResponse({"ok": False, "sym": sym, "error": "not a symbol"}, status_code=400)
     try:
@@ -150,6 +157,8 @@ def order_volume_profile(sym: str, start: int, end: int, open: int = 1, close: i
                              "error": f"{type(e).__name__}: {e}"}, status_code=502)
     try:
         out = order_profile(full, start, end, bool(open), bool(close))
+        if alpha is not None and beta is not None:
+            out = tilt_order_profile(out, alpha, beta, mode)
     except ProfileError as e:
         return JSONResponse({"ok": False, "sym": sym, "source": vprof.label, "error": str(e)},
                             status_code=422)

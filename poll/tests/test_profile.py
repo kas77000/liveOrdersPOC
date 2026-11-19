@@ -263,3 +263,78 @@ def test_a_window_that_never_reaches_the_open_or_close_takes_no_auction():
         order_profile(FULL_JP, 100, 470)                 # all before the 08:00 open
     late = order_profile(FULL_JP, 700, 900)              # runs past the 14:25 close
     assert late["close_included"] and not late["open_included"]
+
+
+# --------------------------------------------------------------------------- tilt (tag 148)
+from backend.profile import _tilt, parse_tag148, tilt_active, tilt_order_profile  # noqa: E402
+
+
+def test_tag148_parses_alpha_beta_and_an_optional_mode():
+    assert parse_tag148("0.5,0.3") == dict(alpha=0.5, beta=0.3, mode=0)
+    assert parse_tag148(" -0.4 , 0.25 , 3") == dict(alpha=-0.4, beta=0.25, mode=3)
+    assert parse_tag148("") is None and parse_tag148(None) is None and parse_tag148("x,1") is None
+
+
+def test_the_engine_only_tilts_with_a_nonzero_alpha_and_beta_inside_0_1():
+    assert tilt_active(0.5, 0.3) and tilt_active(-0.5, 0.99)
+    assert not tilt_active(0.0, 0.3) and not tilt_active(0.5, 0.0) and not tilt_active(0.5, 1.0)
+
+
+def test_tilt_formula_matches_profilesnapshot():
+    # front-load: (1-a)x + a*min(1, x/b); with x=0.2, b=0.4, a=0.5 -> 0.1 + 0.25 = 0.35
+    assert 0.2 + _tilt(0.2, 1.0, 0.5, 0.4) == pytest.approx(0.35)
+    # past the breakpoint the a share is complete: x=0.6 -> 0.3 + 0.5
+    assert 0.6 + _tilt(0.6, 1.0, 0.5, 0.4) == pytest.approx(0.8)
+    # back-load: remaining (1-|a|)(1-x) + |a|*min(1,(1-x)/(1-b)); x=0.2, b=0.6 -> left 0.4+0.5
+    assert 0.2 + _tilt(0.2, 1.0, -0.5, 0.6) == pytest.approx(1 - 0.9)
+    # the volume scale cancels
+    assert _tilt(20.0, 100.0, 0.5, 40.0) == pytest.approx(100 * _tilt(0.2, 1.0, 0.5, 0.4))
+
+
+def test_front_load_runs_ahead_of_the_profile_and_still_ends_at_100_percent():
+    base = order_profile(FULL_JP, 505, 790)
+    t = tilt_order_profile(base, 0.5, 0.3)
+    mid = [r for r in t["rows"] if r["phase"] == "continuous"]
+    assert all(r["cum"] >= r["base_cum"] - 1e-12 for r in mid)
+    assert any(r["cum"] > r["base_cum"] + 0.05 for r in mid)
+    assert t["rows"][-1]["cum"] == pytest.approx(1.0)
+    assert sum(r["share"] for r in t["rows"]) == pytest.approx(1.0)
+    assert [r["base_cum"] for r in t["rows"]] == [r["cum"] for r in base["rows"]]
+
+
+def test_back_load_runs_behind_and_mode_0_leaves_the_auctions_alone():
+    base = order_profile(FULL_JP, 480, 865)
+    t = tilt_order_profile(base, -0.5, 0.3)
+    mid = [r for r in t["rows"] if r["phase"] == "continuous"]
+    assert all(r["cum"] <= r["base_cum"] + 1e-12 for r in mid)
+    assert t["rows"][0]["phase"] == "open auction"
+    assert t["rows"][0]["cum"] == pytest.approx(t["rows"][0]["base_cum"])
+
+
+def test_mode_1_moves_volume_into_the_auction_on_the_tilted_side():
+    base = order_profile(FULL_JP, 480, 865)
+    open0 = base["rows"][0]["share"]
+    assert tilt_order_profile(base, 0.5, 0.3, 1)["rows"][0]["share"] > open0     # front: open grows
+    assert tilt_order_profile(base, -0.5, 0.3, 1)["rows"][0]["share"] < open0    # back: open shrinks
+
+
+def test_no_tilt_when_the_parameters_are_out_of_range():
+    base = order_profile(FULL_JP, 505, 790)
+    t = tilt_order_profile(base, 0.5, 1.5)
+    assert not t["tilt"]["active"] and [r["cum"] for r in t["rows"]] == [r["cum"] for r in base["rows"]]
+
+
+def test_a_morning_window_shows_the_engine_moving_the_breakpoint_before_the_start():
+    t = tilt_order_profile(order_profile(FULL_JP, 540, 620), 0.5, 0.5)
+    assert t["tilt"]["breakpoint"] < 540
+    assert any("before the order starts" in n for n in t["tilt"]["notes"])
+
+
+def test_the_full_day_tilt_is_an_open_to_close_order_on_the_day_profile():
+    from backend.profile import tilt_full_day
+    t = tilt_full_day(FULL_JP, 0.5, 0.3)
+    assert [r["label"] for r in t["rows"]] == [r["label"] for r in FULL_JP["rows"]]
+    assert [r["base_cum"] for r in t["rows"]] == pytest.approx([r["cum"] for r in FULL_JP["rows"]])
+    assert t["tilt"]["active"] and t["rows"][-1]["cum"] == pytest.approx(1.0)
+    assert t["tilt_window"] == [FULL_JP["open_min"], FULL_JP["close_min"]]
+    assert "tilt" not in FULL_JP                       # the cached profile is left alone

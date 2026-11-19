@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import math
 import re
 import statistics
 import threading
@@ -225,6 +226,203 @@ def order_profile(full: dict, start: int, end: int, include_open: bool = True,
                 close_included=any(r["phase"] == "close auction" for r in rows),
                 v12=v12, expected_volume=v12 * full["vtot"], vtot=full["vtot"],
                 open_min=o, close_min=c, lunch=lunch, rows=rows)
+
+
+# --------------------------------------------------------------------------- tilt
+# Tag 148 (a 9012 sub-tag, "alpha,beta[,mode]") front- or back-loads the schedule.
+# Replayed from ai3 ProfileSnapshot.setVolumeFrac / tilt(); line numbers below are
+# ai3/src/com/kas/ai/ProfileSnapshot.java (transcribed from the decompiled class).
+
+def parse_tag148(value) -> dict | None:
+    """'0.5,0.3' or '-0.4,0.25,1' -> {alpha, beta, mode}; None when absent or unreadable
+    (Parameters.__p_148: alpha, beta, optional mode)."""
+    if value is None:
+        return None
+    parts = [p.strip() for p in str(value).split(",")]
+    try:
+        alpha, beta = float(parts[0]), float(parts[1])
+        mode = int(float(parts[2])) if len(parts) > 2 and parts[2] else 0
+    except (IndexError, ValueError):
+        return None
+    return dict(alpha=alpha, beta=beta, mode=mode)
+
+
+def tilt_active(alpha: float, beta: float) -> bool:
+    """ProfileSnapshot ctor (:157): |alpha| > 1e-5 and 0 < beta < 1, else no tilt."""
+    return abs(alpha) > 1.0e-5 and 0.0 < beta < 1.0
+
+
+def _trading_minutes(a: float, b: float, lunch) -> float:
+    """ProfileSnapshot.deltaTime (:221): b - a without the lunch break."""
+    if b <= a:
+        return 0.0
+    if not lunch or lunch[1] <= lunch[0] or b <= lunch[0] or a >= lunch[1]:
+        return b - a
+    l1, l2 = lunch
+    if a < l1:
+        return b - a - (l2 - l1) if b > l2 else l1 - a
+    return b - l2 if b > l2 else 0.0
+
+
+def _jdiv(n: float, d: float) -> float:
+    """Java double division: x/0 is +-inf, 0/0 is NaN."""
+    if d != 0:
+        return n / d
+    return math.nan if n == 0 else math.copysign(math.inf, n)
+
+
+def _jmin(a: float, b: float) -> float:
+    """Java Math.min: NaN wins."""
+    return math.nan if (a != a or b != b) else min(a, b)
+
+
+def _tilt(v1t: float, v12: float, alpha: float, v1b: float) -> float:
+    """ProfileSnapshot.tilt (:488), the amount added to the target volume v1t.
+    x = progress through the window's volume, b = progress at the breakpoint.
+      alpha > 0: (1-a)x + a*min(1, x/b)                - a share done by the breakpoint
+      alpha < 0: remaining (1-|a|)(1-x) + |a|min(1, (1-x)/(1-b)) - a share kept for after it
+    """
+    x = v1t / v12
+    b = v1b / v12
+    if alpha > 0.0:
+        return alpha * v12 * (_jmin(1.0, _jdiv(x, b)) - x)
+    return alpha * v12 * (_jmin(1.0, _jdiv(1.0 - x, 1.0 - b)) - 1.0 + x)
+
+
+def tilt_order_profile(op: dict, alpha: float, beta: float, mode: int = 0) -> dict:
+    """Replay the engine's tag-148 tilt on an order profile (from order_profile).
+
+    The engine recomputes its target at every snapshot; this evaluates the same
+    formulas at the end of each bucket of the order's window, with the profile's own
+    volumes standing in for the live ones (so v1t is the profile's expected volume
+    since the start). It returns the profile with `share` / `cum` replaced by the
+    tilted schedule, the untilted values kept as `base_share` / `base_cum`, and a
+    `tilt` block (breakpoint, b, notes).
+
+    Not modelled: the moo/moc fill adjustments, TMX scaling, vsc/tsc, halts.
+    Times: the window is clipped to the session (open -> close) for t12 / t1t.
+    """
+    out = dict(op, rows=[dict(r) for r in op["rows"]])
+    rows = out["rows"]
+    lunch = op.get("lunch")
+    info = dict(alpha=alpha, beta=beta, mode=mode, active=tilt_active(alpha, beta), notes=[])
+    for r in rows:
+        r["base_share"], r["base_cum"] = r["share"], r["cum"]
+    out["tilt"] = info
+    if not info["active"]:
+        info["notes"].append("no tilt: the engine needs |alpha| > 0 and 0 < beta < 1")
+        return out
+    if abs(alpha) > 1:
+        info["notes"].append("|alpha| > 1: the untilted part (1 - |alpha|) goes negative")
+
+    def auction(phase):
+        return sum(r["day_share"] for r in rows if r["phase"] == phase)
+
+    vopen, vpm, vclose = auction("open auction"), auction("pm auction"), auction("close auction")
+    do_open, do_pm, do_close = vopen > 0, vpm > 0, vclose > 0
+    cont = [r for r in rows if r["phase"] == "continuous"]
+    if not cont:
+        info["notes"].append("no continuous volume in the window: nothing to tilt")
+        return out
+
+    def C(t):   # the window's expected continuous volume up to minute t
+        tot = 0.0
+        for r in cont:
+            if t >= r["end"]:
+                tot += r["day_share"]
+            elif t > r["start"]:
+                tot += r["day_share"] * (t - r["start"]) / (r["end"] - r["start"])
+        return tot
+
+    v12c = C(math.inf)
+    ts = max(op["start"], op["open_min"])
+    te = min(op["end"], op["close_min"])
+    t12 = _trading_minutes(ts, te, lunch)
+    d3 = beta if alpha > 0 else 1.0 - beta                                   # :651
+    itb = te - (1.0 - beta) * t12 if alpha > 0 else te - beta * t12           # :655
+    pm_in_tilt = False
+    if lunch:                                                                 # :656-664
+        if itb <= lunch[1]:
+            itb = lunch[0] - (lunch[1] - itb)
+            pm_in_tilt = do_pm and alpha < 0
+        else:
+            pm_in_tilt = do_pm and alpha > 0
+    itb = round(itb, 2)
+    info["breakpoint"] = itb
+    if itb < ts:
+        info["notes"].append(
+            f"the breakpoint lands at {clock(round(itb))}, before the order starts: the engine "
+            "moves it back by the lunch length whenever it falls before the lunch END, "
+            "even for a window that ends before lunch (ProfileSnapshot.java:657)")
+
+    v1b = None
+    for i, r in enumerate(rows):
+        if r["phase"] == "close auction":
+            r["cum"] = 1.0
+            continue
+        t = r["end"]
+        t1t = _trading_minutes(ts, min(max(t, ts), te), lunch)
+        v1t = C(t)
+        before = t1t <= t12 * d3                                              # :652
+        itb_now = itb if before else 0.0     # the engine resets itb once past it (:644)
+        if before or v1b is None:
+            v1b = C(itb) if itb > t else v1t                                  # :653, :666
+        a = alpha
+        v12l, v1bl = v12c, v1b
+        vb = v1b if a > 0 else v12c - v1b                                     # :673
+        vo = vopm = vc = 0.0
+        if mode in (1, 3):                                                    # :677-696
+            if do_open:
+                v12l += vopen
+                v1bl += vopen
+                vo = vopen if a > 0 else 0.0
+            if do_pm:
+                v12l += vpm
+                if lunch and itb_now > lunch[1]:
+                    v1bl += vpm
+            if do_close:
+                v12l += vclose
+                vc = vclose if a < 0 else 0.0
+            vopm = vpm if (pm_in_tilt and before) else 0.0
+        if mode > 1:
+            a *= v1bl / v12l                                                  # :697
+        vo_n, vpm_n, vc_n = vopen, vpm, vclose
+        if mode in (1, 3):                                                    # :700-713
+            x = abs(a)
+            y = 1.0 - x
+            x *= v12l / (vb + vo + vopm + vc)
+            vo_n, vpm_n, vc_n = vopen * y + vo * x, vpm * y + vopm * x, vclose * y + vc * x
+        tl = _tilt(v1t, v12c, a, v1b)
+        if tl != tl:
+            info["notes"].append(f"{clock(t)}: the tilt is NaN (0/0) - the engine would "
+                                 "reject that snapshot; drawn untilted there")
+            tl = 0.0
+        if before or "b" not in info:      # the values the engine freezes at the breakpoint
+            info["b"], info["alpha_eff"] = v1b / v12c, a
+        total = v12c + vo_n + vpm_n + vc_n
+        done = v1t + tl
+        if any(q["phase"] == "open auction" for q in rows[: i + 1]):
+            done += vo_n
+        if any(q["phase"] == "pm auction" for q in rows[: i + 1]):
+            done += vpm_n
+        r["cum"] = done / total
+    prev = 0.0
+    for r in rows:
+        r["share"], prev = r["cum"] - prev, r["cum"]
+    if any(r["share"] < -1e-12 for r in rows):
+        info["notes"].append("the tilted running total dips in places: the engine re-weights "
+                             "the auctions differently once past the breakpoint")
+    return out
+
+
+def tilt_full_day(full: dict, alpha: float, beta: float, mode: int = 0) -> dict:
+    """The whole-day profile with the tag-148 tilt, as if an order ran from the open to
+    the close with every auction: that order's schedule is the day profile itself (its
+    share of the order equals the share of the day), so the engine's tilt replays on it
+    unchanged. Rows keep the day profile as base_share / base_cum."""
+    op = order_profile(full, full["open_min"], full["close_min"], True, True)
+    t = tilt_order_profile(op, alpha, beta, mode)
+    return dict(full, rows=t["rows"], tilt=t["tilt"], tilt_window=[op["start"], op["end"]])
 
 
 def region_now_minute(tz_name: str = "Asia/Hong_Kong") -> float:

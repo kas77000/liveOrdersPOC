@@ -14,7 +14,7 @@ import math
 
 import pandas as pd
 
-from .fixmsg import parse_fixmsg, participation
+from .fixmsg import parse_9012, parse_fixmsg, participation
 
 KEY = ["id_server", "id_target"]
 
@@ -118,5 +118,7 @@ def build_rows(target, target_state=None, target_client=None, target_stock=None)
             # does the order take part in the auctions (null -> assume yes, as core-vp)
             "doopen": None if g("doopen") is None else bool(g("doopen")),
             "doclose": None if g("doclose") is None else bool(g("doclose")),
+            # 9012 sub-tag 148 "alpha,beta[,mode]": the profile tilt (front / back load)
+            "tag148": parse_9012(tags.get("9012")).get("148"),
         })
     return rows

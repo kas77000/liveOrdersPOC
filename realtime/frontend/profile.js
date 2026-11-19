@@ -2,13 +2,16 @@
 //
 //   Full Day Volume Profile  the WHOLE day as ai3's getsymprof builds it: OPEN,
 //                            10-minute continuous buckets (PM at the lunch reopen),
-//                            CLOSE, each as a share of the day's total volume.
+//                            CLOSE, each as a share of the day's total volume; with
+//                            a tag-148 tilt, as if an order ran from open to close.
 //   Order Volume Profile     that curve cut to the order's window (editable start /
 //                            end / auctions) and rescaled to 100% of the ORDER, as
 //                            ai3's CustomProfile.toMap does for the live algo, with
-//                            where the order should be now and where it is.
+//                            where the order should be now and where it is, and
+//                            the tag-148 tilt (alpha, beta, mode) replayed as ai3's
+//                            ProfileSnapshot does (front / back loading).
 //
-// The numbers come from backend/profile.py (build / order_profile).
+// The numbers come from backend/profile.py (build / order_profile / tilt_order_profile).
 (() => {
   const { useEffect, useMemo, useState } = React;
   const html = htm.bind(React.createElement);
@@ -86,7 +89,9 @@
   //   of       "of the day" | "of the order"
   //   top/bot  panel titles
   //   marker   { t, expected, filled } - the order now (optional)
-  function ProfileChart({ p, per, of, top, bot, marker }) {
+  //   tilt     the tilt block when a tag-148 tilt is applied: rows then carry base_cum
+  //            (the profile without it, drawn dashed) and tilt.breakpoint is marked
+  function ProfileChart({ p, per, of, top, bot, marker, tilt }) {
     const [hover, setHover] = useState(null);
     const rows = p.rows;
     const geo = useMemo(() => {
@@ -99,15 +104,20 @@
       const yc = (v) => TOP.y1 - v * (TOP.y1 - TOP.y0);
       const yb = (v) => BOT.y1 - (v / yMax) * (BOT.y1 - BOT.y0);
       // step-accurate running total: flat until a bucket starts, rising across it
-      let line = `M${x(tA)},${yc(0)}`, prev = 0;
-      for (const r of rows) line += `L${x(r.start)},${yc(prev)}L${x(r.end)},${yc(r.cum)}`, (prev = r.cum);
+      const stepLine = (key) => {
+        let d = `M${x(tA)},${yc(0)}`, prev = 0;
+        for (const r of rows) d += `L${x(r.start)},${yc(prev)}L${x(r.end)},${yc(r[key])}`, (prev = r[key]);
+        return d;
+      };
+      const line = stepLine("cum");
+      const baseLine = tilt && rows[0].base_cum != null ? stepLine("base_cum") : null;
       const span = t1 - t0, step = span > 300 ? 60 : span > 120 ? 30 : 15;
       const hours = [];
       for (let m = Math.ceil(t0 / step) * step; m <= t1; m += step) hours.push(m);
       const bTicks = [0, yMax / 2, yMax];
       const bDec = bTicks.every((v) => Math.abs(v * 100 - Math.round(v * 100)) < 1e-9) ? 0 : 1;
-      return { x, yc, yb, line, hours, bTicks, bDec, t0, t1 };
-    }, [rows]);
+      return { x, yc, yb, line, baseLine, hours, bTicks, bDec, t0, t1 };
+    }, [rows, tilt]);
     const { x, yc, yb } = geo;
     const h = hover != null ? rows[hover] : null;
     const auctions = rows.filter((r) => r.phase !== "continuous").map((r) => (AUCTION_NAME[r.label] || r.label).toLowerCase());
@@ -129,7 +139,8 @@
         <div class="vp-legend">
           <span><i class="sw sw-cont"></i>Continuous, per 10 min</span>
           ${auctions.length ? html`<span><i class="sw sw-auct"></i>Auctions (${auctions.join(", ")})</span>` : null}
-          <span><i class="sw sw-line"></i>${marker ? "Expected progress" : "Running total"}</span>
+          <span><i class="sw sw-line"></i>${marker ? "Expected progress" : "Running total"}${tilt ? " (tilted)" : ""}</span>
+          ${geo.baseLine ? html`<span><i class="sw sw-base"></i>Without the tilt</span>` : null}
           ${marker ? html`<span><i class="sw sw-fill"></i>Filled now</span>` : null}
         </div>
         <svg viewBox=${`0 0 ${W} ${H}`} role="img"
@@ -144,7 +155,11 @@
             <line key=${"gc" + v} class="vp-grid" x1=${L} x2=${W - R} y1=${yc(v)} y2=${yc(v)} />
             <text key=${"tc" + v} class="vp-tick" x=${L - 6} y=${yc(v) + 4} text-anchor="end">${v * 100}%</text>`)}
           <text class="vp-panel" x=${L} y=${TOP.y0 - 14}>${top}</text>
+          ${geo.baseLine ? html`<path class="vp-line base" d=${geo.baseLine} />` : null}
           <path class="vp-line" d=${geo.line} />
+          ${tilt && tilt.breakpoint != null && tilt.breakpoint >= geo.t0 && tilt.breakpoint <= geo.t1 ? html`
+            <line class="vp-bp" x1=${x(tilt.breakpoint)} x2=${x(tilt.breakpoint)} y1=${TOP.y0} y2=${TOP.y1} />
+            <text class="vp-bpl" x=${x(tilt.breakpoint) + 4} y=${TOP.y1 - 4}>breakpoint ${clock(tilt.breakpoint)}</text>` : null}
 
           ${geo.bTicks.map((v, i) => html`
             <line key=${"gb" + i} class=${i === 0 ? "vp-base" : "vp-grid"} x1=${L} x2=${W - R} y1=${yb(v)} y2=${yb(v)} />
@@ -153,7 +168,7 @@
           ${rows.map((r, i) => {
             const x0 = x(r.start) + 1, w = Math.max(1, x(r.end) - x(r.start) - 2);   // 2px gap
             const auction = r.phase !== "continuous";
-            return html`<path key=${"b" + i} d=${barPath(x0, w, yb(r.share), yb(0))}
+            return html`<path key=${"b" + i} d=${barPath(x0, w, yb(Math.max(0, r.share)), yb(0))}
                               class=${"vp-bar " + (auction ? "auct" : "cont") + (hover === i ? " on" : "")} />`;
           })}
           ${rows.filter((r) => r.phase !== "continuous").map((r) => html`
@@ -182,7 +197,8 @@
           <div class="vp-tip" style=${tipStyle(x(h.end) / W)}>
             <b>${h.phase === "continuous" ? `${clock(h.start)}–${clock(h.end)}` : `${AUCTION_NAME[h.label] || h.label} auction`}</b>
             <div>${pct(h.share, 2)} ${of} · ${compact(h.share * per)} sh</div>
-            <div class="muted">running total at ${clock(h.end)}: ${pct(h.cum, 1)}</div>
+            <div class="muted">running total at ${clock(h.end)}: ${pct(h.cum, 1)}${
+              h.base_cum != null && tilt ? ` · without tilt ${pct(h.base_cum, 1)}` : ""}</div>
           </div>` : null}
       </div>`;
   }
@@ -200,34 +216,99 @@
         ${source ? html`<div class="muted">source: ${source}</div>` : null}</div>`;
   }
 
+  // tag 148 = "alpha,beta[,mode]" (9012 sub-tag); text fields so they can be typed freely
+  const orderTilt = (o) => {
+    const [a = "", b = "", m = "0"] = (o.tag148 || "").split(",").map((v) => v.trim());
+    return { alpha: a, beta: b, mode: /^[0-3]$/.test(m) ? m : "0" };
+  };
+  const num = (s) => (s !== "" && Number.isFinite(Number(s)) ? Number(s) : null);
+  const tiltReady = (t) => num(t.alpha) != null && num(t.beta) != null;
+  // the engine tilts only with |alpha| > 1e-5 and 0 < beta < 1 (ProfileSnapshot ctor)
+  function describeTilt(t) {
+    const a = num(t.alpha), b = num(t.beta);
+    if (a == null || b == null) return "no tilt";
+    if (!(Math.abs(a) > 1e-5 && b > 0 && b < 1)) return "inactive (needs alpha ≠ 0 and 0 < beta < 1)";
+    return a > 0 ? `front-load: ${pct(Math.abs(a), 0)} of the order done within the first ${pct(b, 0)} of the time`
+                 : `back-load: ${pct(Math.abs(a), 0)} of the order kept for the last ${pct(b, 0)} of the time`;
+  }
+  const MODES = [["0", "0 · continuous only"], ["1", "1 · + auctions"], ["2", "2 · alpha × b"],
+                 ["3", "3 · + auctions, alpha × b"]];
+
+  // The tag-148 inputs, shared by both tabs: start from the order's own tag 148
+  function TiltInputs({ tilt, setTilt, order, note, extra }) {
+    return html`
+      <div class="op-tilt">
+        <b>Tilt · tag 148</b>
+        <label title="alpha: share of the order moved; > 0 front-loads, < 0 back-loads">alpha
+          <input class=${"op-num" + (tilt.alpha === "" || num(tilt.alpha) != null ? "" : " bad")} value=${tilt.alpha}
+                 placeholder="–" onChange=${(e) => setTilt((t) => ({ ...t, alpha: e.target.value.trim() }))} /></label>
+        <label title="beta: the part of the window's time it goes into (the first beta when front-loading, the last beta when back-loading)">beta
+          <input class=${"op-num" + (tilt.beta === "" || num(tilt.beta) != null ? "" : " bad")} value=${tilt.beta}
+                 placeholder="–" onChange=${(e) => setTilt((t) => ({ ...t, beta: e.target.value.trim() }))} /></label>
+        <label title="mode: 1 / 3 also re-weight the auctions; 2 / 3 scale alpha by the profile's progress at the breakpoint">mode
+          <select value=${tilt.mode} onChange=${(e) => setTilt((t) => ({ ...t, mode: e.target.value }))}>
+            ${MODES.map(([v, l]) => html`<option key=${v} value=${v}>${l}</option>`)}
+          </select></label>
+        <span>${describeTilt(tilt)}</span>
+        <span class="muted">· order's tag 148: ${order.tag148 || "none"}</span>
+        ${extra || null}
+        ${note ? html`<span class="muted op-note">${note}</span>` : null}
+      </div>`;
+  }
+  const tiltQuery = (q, t) => { if (tiltReady(t)) { q.set("alpha", num(t.alpha)); q.set("beta", num(t.beta)); q.set("mode", t.mode); } return q; };
+  const tiltKpi = (tl) => tl ? [["Tilt breakpoint", `${clock(tl.breakpoint)} · ${pct(tl.b, 0)}`,
+    `the profile has ${pct(tl.b, 1)} of the window's continuous volume by ${clock(tl.breakpoint)}` +
+    (tl.mode > 1 ? ` · alpha scaled to ${tl.alpha_eff.toFixed(3)}` : "")]] : [];
+  const TiltNotes = ({ t }) => t && t.notes.length
+    ? html`<ul class="op-notes">${t.notes.map((n, i) => html`<li key=${i}>${n}</li>`)}</ul>` : null;
+
+
   // ------------------------------------------------------------------ full day
-  function FullDayTab({ sym }) {
+  function FullDayTab({ order }) {
+    const sym = order.sym;
+    const [tilt, setTilt] = useState(() => orderTilt(order));
     const [state, setState] = useState({ loading: true });
+    const ready = tiltReady(tilt);
+    const tiltEdited = JSON.stringify(tilt) !== JSON.stringify(orderTilt(order));
     useEffect(() => {
       const ac = new AbortController();
-      setState({ loading: true });
-      getJSON(`/api/profile?sym=${encodeURIComponent(sym)}`, ac.signal)
-        .then((d) => setState(d.ok ? { data: d } : { error: d.error || "unknown error", source: d.source }))
-        .catch((e) => e.name !== "AbortError" && setState({ error: String(e) }));
-      return () => ac.abort();
-    }, [sym]);
+      const t = setTimeout(() => {
+        const q = tiltQuery(new URLSearchParams({ sym }), tilt);
+        getJSON(`/api/profile?${q}`, ac.signal)
+          .then((d) => setState(d.ok ? { data: d } : { error: d.error || "unknown error", source: d.source }))
+          .catch((e) => e.name !== "AbortError" && setState({ error: String(e) }));
+      }, 250);
+      return () => { clearTimeout(t); ac.abort(); };
+    }, [sym, ready, tilt.alpha, tilt.beta, tilt.mode]);
 
-    if (state.loading) return html`<div class="vp-msg">Loading volume profile…</div>`;
-    if (state.error) return html`<${Problem} sym=${sym} error=${state.error} source=${state.source} />`;
+    const controls = html`
+      <${TiltInputs} tilt=${tilt} setTilt=${setTilt} order=${order}
+                     note="A what-if the engine never computes: its tilt applied as if an order ran from the open to the close, every auction included. The dashed line is the market's profile."
+                     extra=${html`<button class="theme-btn" disabled=${!tiltEdited} onClick=${() => setTilt(orderTilt(order))}
+                                          title="Back to the order's own tag 148">Reset to order</button>`} />`;
+
+    if (state.loading) return html`<div>${controls}<div class="vp-msg">Loading volume profile…</div></div>`;
+    if (state.error) return html`<div>${controls}<${Problem} sym=${sym} error=${state.error} source=${state.source} /></div>`;
 
     const p = state.data;
-    const auctions = p.rows.filter((r) => r.phase !== "continuous").reduce((a, r) => a + r.share, 0);
+    const tl = p.tilt && p.tilt.active ? p.tilt : null;
+    // the market's auction volume, untilted (the tilt only reshapes an order's schedule)
+    const auctions = p.rows.filter((r) => r.phase !== "continuous").reduce((a, r) => a + (r.base_share ?? r.share), 0);
     return html`
       <div>
+        ${controls}
         <${Kpis} items=${[
           ["ADV (continuous)", compact(p.adv), `${qty(p.adv)} shares`],
           ["Open auction", compact(p.v_open), `${qty(p.v_open)} shares · ${pct(p.v_open / p.vtot)} of the day`],
           ["Close auction", compact(p.v_close), `${qty(p.v_close)} shares · ${pct(p.v_close / p.vtot)} of the day`],
           ...(p.v_open_pm > 0 ? [["PM auction", compact(p.v_open_pm), `${qty(p.v_open_pm)} shares`]] : []),
           ["Auctions, share of day", pct(auctions), "open + PM + close over the day's total volume"],
+          ...tiltKpi(tl),
         ]} />
-        <${ProfileChart} p=${p} per=${p.vtot} of="of the day"
-                         top="Running total, share of the day" bot="Share of the day per bucket" />
+        <${ProfileChart} p=${p} per=${p.vtot} of="of the day" tilt=${tl}
+                         top=${tl ? "Running total with the tilt (an order from open to close), share of the day" : "Running total, share of the day"}
+                         bot=${tl ? "Share of the day per bucket, tilted" : "Share of the day per bucket"} />
+        <${TiltNotes} t=${p.tilt} />
         <div class="vp-foot muted">Profile dated <b>${p.date}</b> · Times on the region clock · ${p.source}</div>
       </div>`;
   }
@@ -240,6 +321,8 @@
     close: o.doclose !== false,
   });
   const toInput = (m) => clock(Math.max(0, Math.min(m, 24 * 60 - 1)));
+
+
 
   // A 24-hour HH:MM field on the region clock. <input type=time> follows the OS locale
   // (12h on some machines) while every other time here is 24h, so this is plain text:
@@ -258,8 +341,11 @@
   function OrderTab({ order }) {
     // The window starts as the order's own and can be edited; "Reset" restores it.
     const [win, setWin] = useState(() => orderWindow(order));
+    const [tilt, setTilt] = useState(() => orderTilt(order));
     const [state, setState] = useState({ loading: true });
     const edited = JSON.stringify(win) !== JSON.stringify(orderWindow(order));
+    const tiltEdited = JSON.stringify(tilt) !== JSON.stringify(orderTilt(order));
+    const ready = tiltReady(tilt);
 
     useEffect(() => {
       const ac = new AbortController();
@@ -267,12 +353,13 @@
       const t = setTimeout(() => {
         const q = new URLSearchParams({ sym: order.sym, start: win.start, end: win.end,
                                         open: win.open ? 1 : 0, close: win.close ? 1 : 0 });
+        tiltQuery(q, tilt);
         getJSON(`/api/order_profile?${q}`, ac.signal)
           .then((d) => setState(d.ok ? { data: d } : { error: d.error || "unknown error", source: d.source }))
           .catch((e) => e.name !== "AbortError" && setState({ error: String(e) }));
       }, 250);
       return () => { clearTimeout(t); ac.abort(); };
-    }, [order.sym, win.start, win.end, win.open, win.close]);
+    }, [order.sym, win.start, win.end, win.open, win.close, ready, tilt.alpha, tilt.beta, tilt.mode]);
 
     const set = (k) => (e) => setWin((w) => ({ ...w, [k]: e.target.checked }));
     const setTime = (k) => (m) => setWin((w) => ({ ...w, [k]: m }));
@@ -283,22 +370,26 @@
         <label>End <${TimeField} value=${win.end} onCommit=${setTime("end")} /></label>
         <label><input type="checkbox" checked=${win.open} onChange=${set("open")} /> Open auction</label>
         <label><input type="checkbox" checked=${win.close} onChange=${set("close")} /> Close auction</label>
-        <button class="theme-btn" disabled=${!edited} onClick=${() => setWin(orderWindow(order))}
-                title="Back to the order's own start, end and auction flags">Reset to order</button>
-        ${edited ? html`<span class="muted op-edited">edited — not the order's own window</span>` : null}
-      </div>`;
+        <button class="theme-btn" disabled=${!edited && !tiltEdited}
+                onClick=${() => { setWin(orderWindow(order)); setTilt(orderTilt(order)); }}
+                title="Back to the order's own start, end, auction flags and tag 148">Reset to order</button>
+        ${edited || tiltEdited ? html`<span class="muted op-edited">edited — not the order's own settings</span>` : null}
+      </div>
+      <${TiltInputs} tilt=${tilt} setTilt=${setTilt} order=${order} />`;
 
     if (state.loading) return html`<div>${controls}<div class="vp-msg">Loading…</div></div>`;
     if (state.error) return html`<div>${controls}<${Problem} sym=${order.sym} error=${state.error} source=${state.source} /></div>`;
 
     const p = state.data;
+    const tl = p.tilt && p.tilt.active ? p.tilt : null;
     const size = order.size || 0;
     const filled = size ? (order.filled || 0) / size : null;
     const now = p.now_min;
     // where the order should be now: the expected curve read at now (capped to the window)
     let marker = null, expectedNow = null;
     if (now >= p.start) {
-      const t = Math.min(now, p.end);
+      // capped to the window and to its last bucket (a window may run on into lunch)
+      const t = Math.min(now, p.end, p.rows[p.rows.length - 1].end);
       expectedNow = cumAt(p.rows, t);
       if (filled != null) marker = { t, expected: expectedNow, filled };
     }
@@ -318,9 +409,12 @@
            `order size ${qty(size)} over the expected market volume: the participation it implies`],
           ["Expected by now · filled", expectedNow == null ? "not started" : `${pct(expectedNow, 0)} · ${pct(filled, 0)}`,
            gap == null ? "the window has not started yet" : `${gap >= 0 ? "ahead" : "behind"} by ${pct(Math.abs(gap), 1)} of the order`],
+          ...tiltKpi(tl),
         ]} />
-        <${ProfileChart} p=${p} per=${size} of="of the order" marker=${marker}
-                         top="Expected progress, share of the order" bot="Share of the order per bucket" />
+        <${ProfileChart} p=${p} per=${size} of="of the order" marker=${marker} tilt=${tl}
+                         top=${tl ? "Expected progress with the tilt, share of the order" : "Expected progress, share of the order"}
+                         bot="Share of the order per bucket" />
+        <${TiltNotes} t=${p.tilt} />
         <div class="vp-foot muted">
           Auctions included: ${aucs} · Profile dated <b>${p.date}</b> · Times on the region clock · ${p.source}
         </div>
@@ -352,7 +446,7 @@
                       onClick=${() => setTab(k)}>${label}</button>`)}
           </div>
           <div class="modal-body">
-            ${tab === "full" ? html`<${FullDayTab} sym=${order.sym} />` : null}
+            ${tab === "full" ? html`<${FullDayTab} order=${order} />` : null}
             ${tab === "order" ? html`<${OrderTab} order=${order} />` : null}
           </div>
         </div>
