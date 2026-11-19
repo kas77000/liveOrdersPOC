@@ -24,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from .sources import KdbSource, MockSource
 from .profile import (SYM_RE, MockVprof, ProfileError, VprofSource, order_profile,
                       region_now_minute, tilt_full_day, tilt_order_profile)
+from .today import MockQatt, QattSource, today_vs_profile
 from .transform import build_rows
 
 log = logging.getLogger("liveorders")
@@ -40,6 +41,16 @@ def make_source():
         return KdbSource(host, int(os.getenv("KDB_PORT", "5000")),
                          os.getenv("KDB_USER", ""), os.getenv("KDB_PASS", ""))
     return MockSource()
+
+
+def make_qatt_source():
+    """qatt on the QUOTES real-time server (today's prints); simulated without it."""
+    host = os.getenv("QATT_HOST")
+    if host:
+        return QattSource(host, int(os.getenv("QATT_PORT", "5000")),
+                          os.getenv("QATT_USER", os.getenv("KDB_USER", "")),
+                          os.getenv("QATT_PASS", os.getenv("KDB_PASS", "")))
+    return MockQatt(os.getenv("REGION_TZ", "Asia/Hong_Kong"))
 
 
 def make_profile_source():
@@ -97,6 +108,7 @@ class Hub:
 
 hub = Hub(make_source())
 vprof = make_profile_source()
+qatt = make_qatt_source()
 # the clock the profile, the orders and qatt share; "now" for the fill marker
 REGION_TZ = os.getenv("REGION_TZ", "Asia/Hong_Kong")
 
@@ -109,6 +121,7 @@ async def lifespan(_app):
     task.cancel()
     hub.source.close()
     vprof.close()
+    qatt.close()
 
 
 app = FastAPI(title="Live Orders POC", lifespan=lifespan)
@@ -136,6 +149,28 @@ def volume_profile(sym: str, alpha: float | None = None, beta: float | None = No
         log.warning("profile for %s failed: %s", sym, e)
         return JSONResponse({"ok": False, "sym": sym, "source": vprof.label,
                              "error": f"{type(e).__name__}: {e}"}, status_code=502)
+
+
+@app.get("/api/today")
+def today_volume(sym: str, now: float | None = None):
+    """Today's traded volume per profile bucket (qatt) and the forecast to the close
+    (see today.py). `now` (minute of the day, region clock) overrides the clock, to
+    look at a moment of the day."""
+    if not SYM_RE.fullmatch(sym or ""):
+        return JSONResponse({"ok": False, "sym": sym, "error": "not a symbol"}, status_code=400)
+    try:
+        full = vprof.get(sym)
+    except Exception as e:
+        return JSONResponse({"ok": False, "sym": sym, "source": vprof.label,
+                             "error": f"profile: {type(e).__name__}: {e}"}, status_code=502)
+    t = region_now_minute(REGION_TZ) if now is None else now
+    try:
+        minutes = qatt.get(sym, full, now=t)
+    except Exception as e:
+        log.warning("qatt for %s failed: %s", sym, e)
+        return JSONResponse({"ok": False, "sym": sym, "source": qatt.label,
+                             "error": f"{type(e).__name__}: {e}"}, status_code=502)
+    return {"ok": True, "source": qatt.label, **today_vs_profile(full, minutes, t)}
 
 
 @app.get("/api/order_profile")

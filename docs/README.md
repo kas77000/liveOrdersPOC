@@ -8,6 +8,7 @@ code it follows, so the numbers can be checked against the algo engine.
 | [Activated orders](activated-orders.md) | Which orders the blotter shows by default, and the State column | `kdb-queries` scripts: `select state:last state … where state=` `` `activated `` |
 | [Full Day Volume Profile](full-day-volume-profile.md) | The symbol's whole-day profile, auctions included (first tab of the order modal) | `getsymprof` in `ai3/src/com/kas/ai/kdb/getVolumeProfileReport.q` |
 | [Order Volume Profile](order-volume-profile.md) | The profile cut to the order's window, as a share of the order (second tab) | `CustomProfile.toMap` in `ai3/src/com/kas/ai/CustomProfile.java` (live algo) |
+| [Today's volume and forecast](today-volume-forecast.md) | Today's traded volume (qatt) on the Full Day tab, bucketed like the profile, with a forecast to the close | `liquidity_profile.q` in `kdb-queries/queries/liquidity_profile` (the qatt read) |
 | [Profile tilt — tag 148](profile-tilt-tag148.md) | Front / back loading: the engine's tilt on the order's window (second tab) and, as a what-if, on an open-to-close order (first tab) | `ProfileSnapshot.setVolumeFrac` / `tilt` in `ai3/src/com/kas/ai/ProfileSnapshot.java` |
 
 ## Conventions used in every page

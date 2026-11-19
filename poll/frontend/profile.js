@@ -3,7 +3,9 @@
 //   Full Day Volume Profile  the WHOLE day as ai3's getsymprof builds it: OPEN,
 //                            10-minute continuous buckets (PM at the lunch reopen),
 //                            CLOSE, each as a share of the day's total volume; with
-//                            a tag-148 tilt, as if an order ran from open to close.
+//                            a tag-148 tilt, as if an order ran from open to close;
+//                            and today's traded volume (qatt) with a forecast to
+//                            the close (backend/today.py), each layer switchable.
 //   Order Volume Profile     that curve cut to the order's window (editable start /
 //                            end / auctions) and rescaled to 100% of the ORDER, as
 //                            ai3's CustomProfile.toMap does for the live algo, with
@@ -91,16 +93,38 @@
   //   marker   { t, expected, filled } - the order now (optional)
   //   tilt     the tilt block when a tag-148 tilt is applied: rows then carry base_cum
   //            (the profile without it, drawn dashed) and tilt.breakpoint is marked
-  function ProfileChart({ p, per, of, top, bot, marker, tilt }) {
+  //   today    /api/today (optional): today's traded shares per bucket (same rows as
+  //            p) and the forecast to the close, drawn as a share of today's
+  //            forecast total so its shape compares with the profile's
+  //   show     { profile, tilt, today, forecast } - which layers are drawn
+  const SHOW_ALL = { profile: true, tilt: true, today: true, forecast: true };
+
+  function ProfileChart({ p, per, of, top, bot, marker, tilt, today, show = SHOW_ALL }) {
     const [hover, setHover] = useState(null);
-    const rows = p.rows;
+    const tiltOn = !!(tilt && show.tilt);
+    // with the tilt hidden, the profile is the market's own (base_*)
+    const rows = useMemo(() => (tilt && !tiltOn
+      ? p.rows.map((r) => ({ ...r, share: r.base_share, cum: r.base_cum })) : p.rows), [p.rows, tilt, tiltOn]);
+    const td = today && today.rows && today.rows.length === rows.length ? today : null;
+    const todayOn = !!(td && show.today);
+    const fcOn = !!(td && show.forecast && !td.finished);
+    const mainOn = show.profile || tiltOn;           // the profile (or tilted) line and bars
+    const baseOn = tiltOn && show.profile;           // the market's line under the tilt
+    const ghost = todayOn || fcOn;                   // profile bars as outlines behind today's
+
     const geo = useMemo(() => {
       // a margin either side so the OPEN / CLOSE bars and labels clear the axes
       const PAD = 12;   // minutes
       const tA = rows[0].start, tB = rows[rows.length - 1].end;
       const t0 = tA - PAD, t1 = tB + PAD;
       const x = (m) => L + ((m - t0) / (t1 - t0)) * (W - L - R);
-      const yMax = niceMax(Math.max(...rows.map((r) => r.share)) * 1.08);
+      // today, as a share of its forecast total: a (traded) + f (forecast) per bucket
+      const T = td ? td.forecast_day || 1 : 1;
+      const tr = td ? td.rows.map((r) => ({ a: r.actual / T, f: r.forecast / T, el: r.elapsed })) : [];
+      const tops = [];
+      if (mainOn) tops.push(...rows.map((r) => r.share));
+      if (todayOn || fcOn) tops.push(...tr.map((r) => (todayOn ? r.a : 0) + (fcOn ? r.f : 0)));
+      const yMax = niceMax(Math.max(0.001, ...tops) * 1.08);
       const yc = (v) => TOP.y1 - v * (TOP.y1 - TOP.y0);
       const yb = (v) => BOT.y1 - (v / yMax) * (BOT.y1 - BOT.y0);
       // step-accurate running total: flat until a bucket starts, rising across it
@@ -111,17 +135,44 @@
       };
       const line = stepLine("cum");
       const baseLine = tilt && rows[0].base_cum != null ? stepLine("base_cum") : null;
+      // today: traded up to now, then the forecast from now to the close
+      let tLine = null, fLine = null, nowX = null, nowY = null;
+      if (td) {
+        const now = td.now_min;
+        let d = `M${x(tA)},${yc(0)}`, cum = 0;
+        for (let i = 0; i < rows.length; i++) {
+          const r = rows[i], e = tr[i];
+          if (e.el >= 1) d += `L${x(r.start)},${yc(cum)}L${x(r.end)},${yc(cum + e.a)}`;
+          else if (e.el > 0) { d += `L${x(r.start)},${yc(cum)}L${x(now)},${yc(cum + e.a)}`; cum += e.a; break; }
+          else { if (now > r.start) d += `L${x(now)},${yc(cum)}`; break; }
+          cum += e.a;
+        }
+        tLine = d;
+        nowX = x(Math.max(tA, Math.min(now, tB))); nowY = yc(td.traded / T);
+        if (!td.finished) {
+          let f = `M${nowX},${nowY}`, c2 = 0;
+          for (let i = 0; i < rows.length; i++) {
+            const r = rows[i], e = tr[i], from = c2;
+            c2 += e.a + e.f;
+            if (e.el >= 1) continue;
+            f += `L${x(Math.max(r.start, now))},${yc(from + e.a)}L${x(r.end)},${yc(c2)}`;
+          }
+          fLine = f;
+        }
+      }
       const span = t1 - t0, step = span > 300 ? 60 : span > 120 ? 30 : 15;
       const hours = [];
       for (let m = Math.ceil(t0 / step) * step; m <= t1; m += step) hours.push(m);
       const bTicks = [0, yMax / 2, yMax];
       const bDec = bTicks.every((v) => Math.abs(v * 100 - Math.round(v * 100)) < 1e-9) ? 0 : 1;
-      return { x, yc, yb, line, baseLine, hours, bTicks, bDec, t0, t1 };
-    }, [rows, tilt]);
-    const { x, yc, yb } = geo;
+      return { x, yc, yb, line, baseLine, tLine, fLine, nowX, nowY, tr, T, hours, bTicks, bDec, t0, t1 };
+    }, [rows, tilt, td, mainOn, todayOn, fcOn]);
+    const { x, yc, yb, tr } = geo;
     const h = hover != null ? rows[hover] : null;
+    const ht = h && td ? td.rows[hover] : null;
     const auctions = rows.filter((r) => r.phase !== "continuous").map((r) => (AUCTION_NAME[r.label] || r.label).toLowerCase());
     const showLunch = p.lunch && p.lunch[0] >= geo.t0 && p.lunch[1] <= geo.t1;
+    const profName = td ? "Profile" : marker ? "Expected progress" : "Running total";
 
     // the order now: where it should be (on the line) and where it is
     let mk = null;
@@ -133,14 +184,17 @@
       mk = { mx, ye, yf, anchor: right ? "start" : "end", dx: right ? 9 : -9,
              yeL: apart ? Math.min(ye, yf) - 7 : ye + 4, yfL: apart ? Math.max(ye, yf) + 13 : yf + 4 };
     }
+    const nowOn = td && (todayOn || fcOn) && !td.finished && td.now_min >= geo.t0 && td.now_min <= geo.t1;
 
     return html`
       <div class="vp-chart">
         <div class="vp-legend">
-          <span><i class="sw sw-cont"></i>Continuous, per 10 min</span>
-          ${auctions.length ? html`<span><i class="sw sw-auct"></i>Auctions (${auctions.join(", ")})</span>` : null}
-          <span><i class="sw sw-line"></i>${marker ? "Expected progress" : "Running total"}${tilt ? " (tilted)" : ""}</span>
-          ${geo.baseLine ? html`<span><i class="sw sw-base"></i>Without the tilt</span>` : null}
+          ${mainOn ? html`<span><i class=${"sw sw-cont" + (ghost ? " ghost" : "")}></i>${td ? "Profile, per 10 min" : "Continuous, per 10 min"}</span>` : null}
+          ${mainOn && auctions.length ? html`<span><i class=${"sw sw-auct" + (ghost ? " ghost" : "")}></i>${td ? "Profile auctions" : `Auctions (${auctions.join(", ")})`}</span>` : null}
+          ${mainOn ? html`<span><i class="sw sw-line"></i>${profName}${tiltOn ? " (tilted)" : ""}</span>` : null}
+          ${baseOn && geo.baseLine ? html`<span><i class="sw sw-base"></i>${td ? "Profile without the tilt" : "Without the tilt"}</span>` : null}
+          ${todayOn ? html`<span><i class="sw sw-today"></i>Traded today</span>` : null}
+          ${fcOn ? html`<span><i class="sw sw-fc"></i>Forecast to the close</span>` : null}
           ${marker ? html`<span><i class="sw sw-fill"></i>Filled now</span>` : null}
         </div>
         <svg viewBox=${`0 0 ${W} ${H}`} role="img"
@@ -155,9 +209,11 @@
             <line key=${"gc" + v} class="vp-grid" x1=${L} x2=${W - R} y1=${yc(v)} y2=${yc(v)} />
             <text key=${"tc" + v} class="vp-tick" x=${L - 6} y=${yc(v) + 4} text-anchor="end">${v * 100}%</text>`)}
           <text class="vp-panel" x=${L} y=${TOP.y0 - 14}>${top}</text>
-          ${geo.baseLine ? html`<path class="vp-line base" d=${geo.baseLine} />` : null}
-          <path class="vp-line" d=${geo.line} />
-          ${tilt && tilt.breakpoint != null && tilt.breakpoint >= geo.t0 && tilt.breakpoint <= geo.t1 ? html`
+          ${baseOn && geo.baseLine ? html`<path class="vp-line base" d=${geo.baseLine} />` : null}
+          ${mainOn ? html`<path class="vp-line" d=${geo.line} />` : null}
+          ${fcOn && geo.fLine ? html`<path class="vp-fc-line" d=${geo.fLine} />` : null}
+          ${todayOn ? html`<path class="vp-today-line" d=${geo.tLine} />` : null}
+          ${tiltOn && tilt.breakpoint != null && tilt.breakpoint >= geo.t0 && tilt.breakpoint <= geo.t1 ? html`
             <line class="vp-bp" x1=${x(tilt.breakpoint)} x2=${x(tilt.breakpoint)} y1=${TOP.y0} y2=${TOP.y1} />
             <text class="vp-bpl" x=${x(tilt.breakpoint) + 4} y=${TOP.y1 - 4}>breakpoint ${clock(tilt.breakpoint)}</text>` : null}
 
@@ -165,18 +221,37 @@
             <line key=${"gb" + i} class=${i === 0 ? "vp-base" : "vp-grid"} x1=${L} x2=${W - R} y1=${yb(v)} y2=${yb(v)} />
             <text key=${"tb" + i} class="vp-tick" x=${L - 6} y=${yb(v) + 4} text-anchor="end">${pct(v, geo.bDec)}</text>`)}
           <text class="vp-panel" x=${L} y=${BOT.y0 - 14}>${bot}</text>
-          ${rows.map((r, i) => {
+          ${(todayOn || fcOn) ? rows.map((r, i) => {
+            // today's bar: traded at the bottom, the forecast stacked on it
+            const x0 = x(r.start) + 1, w = Math.max(1, x(r.end) - x(r.start) - 2), e = tr[i];
+            const a = todayOn ? e.a : 0, f = fcOn ? e.f : 0;
+            return html`<g key=${"t" + i} class=${hover === i ? "on" : ""}>
+              ${a > 0 ? (f > 0 ? html`<rect class="vp-bar today" x=${x0} width=${w} y=${yb(a)} height=${yb(0) - yb(a)} />`
+                               : html`<path class="vp-bar today" d=${barPath(x0, w, yb(a), yb(0))} />`) : null}
+              ${f > 0 ? html`<path class="vp-bar fc" d=${barPath(x0, w, yb(a + f), yb(a))} />` : null}
+            </g>`;
+          }) : null}
+          ${mainOn ? rows.map((r, i) => {
             const x0 = x(r.start) + 1, w = Math.max(1, x(r.end) - x(r.start) - 2);   // 2px gap
             const auction = r.phase !== "continuous";
             return html`<path key=${"b" + i} d=${barPath(x0, w, yb(Math.max(0, r.share)), yb(0))}
-                              class=${"vp-bar " + (auction ? "auct" : "cont") + (hover === i ? " on" : "")} />`;
+                              class=${"vp-bar " + (auction ? "auct" : "cont") + (ghost ? " ghost" : "") + (hover === i ? " on" : "")} />`;
+          }) : null}
+          ${rows.filter((r) => r.phase !== "continuous").map((r) => {
+            const i = rows.indexOf(r), e = tr[i];
+            const topv = Math.max(mainOn ? r.share : 0, e ? (todayOn ? e.a : 0) + (fcOn ? e.f : 0) : 0);
+            return html`
+            <text key=${"l" + r.label} class="vp-label" y=${yb(topv) - 8}
+                  x=${(x(r.start) + x(r.end)) / 2} text-anchor="middle">${AUCTION_NAME[r.label] || r.label}</text>`;
           })}
-          ${rows.filter((r) => r.phase !== "continuous").map((r) => html`
-            <text key=${"l" + r.label} class="vp-label" y=${yb(r.share) - 8}
-                  x=${(x(r.start) + x(r.end)) / 2} text-anchor="middle">${AUCTION_NAME[r.label] || r.label}</text>`)}
 
           ${geo.hours.map((m) => html`
             <text key=${"x" + m} class="vp-tick" x=${x(m)} y=${H - 8} text-anchor="middle">${clock(m)}</text>`)}
+
+          ${nowOn ? html`
+            <line class="vp-now" x1=${geo.nowX} x2=${geo.nowX} y1=${TOP.y0} y2=${BOT.y1} />
+            <text class="vp-note" x=${geo.nowX} y=${TOP.y0 - 3} text-anchor="middle">now ${clock(td.now_min)}</text>
+            ${todayOn ? html`<circle class="vp-today-dot" cx=${geo.nowX} cy=${geo.nowY} r="4" />` : null}` : null}
 
           ${mk ? html`
             <line class="vp-now" x1=${mk.mx} x2=${mk.mx} y1=${TOP.y0} y2=${BOT.y1} />
@@ -188,7 +263,7 @@
 
           ${h ? html`<line class="vp-cross" x1=${x(h.end)} x2=${x(h.end)}
                            y1=${TOP.y0} y2=${BOT.y1} />
-                     <circle class="vp-dot" cx=${x(h.end)} cy=${yc(h.cum)} r="4" />` : null}
+                     ${mainOn ? html`<circle class="vp-dot" cx=${x(h.end)} cy=${yc(h.cum)} r="4" />` : null}` : null}
           ${rows.map((r, i) => html`
             <rect key=${"h" + i} class="vp-hit" x=${x(r.start)} y=${TOP.y0} width=${Math.max(4, x(r.end) - x(r.start))}
                   height=${BOT.y1 - TOP.y0} onMouseEnter=${() => setHover(i)} />`)}
@@ -196,9 +271,13 @@
         ${h ? html`
           <div class="vp-tip" style=${tipStyle(x(h.end) / W)}>
             <b>${h.phase === "continuous" ? `${clock(h.start)}–${clock(h.end)}` : `${AUCTION_NAME[h.label] || h.label} auction`}</b>
-            <div>${pct(h.share, 2)} ${of} · ${compact(h.share * per)} sh</div>
+            ${mainOn ? html`<div>${td ? "profile: " : ""}${pct(h.share, 2)} ${of} · ${compact(h.share * per)} sh</div>
             <div class="muted">running total at ${clock(h.end)}: ${pct(h.cum, 1)}${
-              h.base_cum != null && tilt ? ` · without tilt ${pct(h.base_cum, 1)}` : ""}</div>
+              h.base_cum != null && tiltOn ? ` · without tilt ${pct(h.base_cum, 1)}` : ""}</div>` : null}
+            ${ht && (todayOn || fcOn) ? html`
+              ${todayOn ? html`<div>traded: ${compact(ht.actual)} sh${ht.trades ? ` · ${ht.trades} trades` : ""} · expected ${compact(ht.expected)}</div>` : null}
+              ${fcOn && ht.forecast > 0 ? html`<div>forecast: ${compact(ht.forecast)} sh</div>` : null}
+              <div class="muted">today ${pct((ht.actual + ht.forecast) / geo.T, 2)} of the day's ${td.finished ? "total" : "forecast"}</div>` : null}
           </div>` : null}
       </div>`;
   }
@@ -264,12 +343,29 @@
 
 
   // ------------------------------------------------------------------ full day
+  const TODAY_REFRESH_MS = 30000;
   function FullDayTab({ order }) {
     const sym = order.sym;
     const [tilt, setTilt] = useState(() => orderTilt(order));
     const [state, setState] = useState({ loading: true });
     const ready = tiltReady(tilt);
     const tiltEdited = JSON.stringify(tilt) !== JSON.stringify(orderTilt(order));
+    // today's prints and the forecast, refreshed while the tab is open
+    const [today, setToday] = useState({ loading: true });
+    const [show, setShow] = useState(SHOW_ALL);
+    useEffect(() => {
+      let ac = null;
+      const load = () => {
+        if (ac) ac.abort();
+        ac = new AbortController();
+        getJSON(`/api/today?${new URLSearchParams({ sym })}`, ac.signal)
+          .then((d) => setToday(d.ok ? { data: d } : { error: d.error || "unknown error", source: d.source }))
+          .catch((e) => e.name !== "AbortError" && setToday({ error: String(e) }));
+      };
+      load();
+      const iv = setInterval(load, TODAY_REFRESH_MS);
+      return () => { clearInterval(iv); if (ac) ac.abort(); };
+    }, [sym]);
     useEffect(() => {
       const ac = new AbortController();
       const t = setTimeout(() => {
@@ -292,6 +388,29 @@
 
     const p = state.data;
     const tl = p.tilt && p.tilt.active ? p.tilt : null;
+    const td = today.data || null;
+    const toggle = (k) => (e) => setShow((v) => ({ ...v, [k]: e.target.checked }));
+    const layers = html`
+      <div class="op-layers">
+        <span class="muted">Show</span>
+        <label><input type="checkbox" checked=${show.profile} onChange=${toggle("profile")} /> Volume profile</label>
+        ${tl ? html`<label><input type="checkbox" checked=${show.tilt} onChange=${toggle("tilt")} /> Tilt (tag 148)</label>` : null}
+        <label title=${td ? "" : "no trades loaded"}><input type="checkbox" checked=${show.today} disabled=${!td}
+               onChange=${toggle("today")} /> Traded today</label>
+        <label title=${td && td.finished ? "the close has traded: nothing left to forecast" : ""}>
+          <input type="checkbox" checked=${show.forecast} disabled=${!td || td.finished}
+                 onChange=${toggle("forecast")} /> Forecast to the close</label>
+        ${today.error ? html`<span class="op-warn">Today's trades unavailable: ${today.error}</span>` : null}
+        ${today.loading ? html`<span class="muted">loading today's trades…</span>` : null}
+      </div>`;
+    const todayKpis = td ? [
+      ["Traded today", compact(td.traded), `${qty(td.traded)} shares in ${qty(td.trades)} trades, by ${clock(td.now_min)}`],
+      ["Pace vs profile", td.pace_raw == null ? "–" : `${td.pace_raw.toFixed(2)}×`,
+       `traded ÷ what the profile expected by now (${qty(td.expected_now)} sh); the forecast uses ` +
+       `${td.pace.toFixed(2)}×, pulled towards 1 as if ${pct(td.prior_day_fraction, 0)} of a day had traded on profile`],
+      [td.finished ? "Day's volume" : "Forecast day volume", compact(td.forecast_day),
+       `${qty(td.forecast_day)} shares · the profile expects ${qty(td.expected_day)} (${pct(td.forecast_day / td.expected_day - 0, 0)} of it)`],
+    ] : [];
     // the market's auction volume, untilted (the tilt only reshapes an order's schedule)
     const auctions = p.rows.filter((r) => r.phase !== "continuous").reduce((a, r) => a + (r.base_share ?? r.share), 0);
     return html`
@@ -303,13 +422,18 @@
           ["Close auction", compact(p.v_close), `${qty(p.v_close)} shares · ${pct(p.v_close / p.vtot)} of the day`],
           ...(p.v_open_pm > 0 ? [["PM auction", compact(p.v_open_pm), `${qty(p.v_open_pm)} shares`]] : []),
           ["Auctions, share of day", pct(auctions), "open + PM + close over the day's total volume"],
-          ...tiltKpi(tl),
+          ...todayKpis,
+          ...(show.tilt ? tiltKpi(tl) : []),
         ]} />
-        <${ProfileChart} p=${p} per=${p.vtot} of="of the day" tilt=${tl}
-                         top=${tl ? "Running total with the tilt (an order from open to close), share of the day" : "Running total, share of the day"}
-                         bot=${tl ? "Share of the day per bucket, tilted" : "Share of the day per bucket"} />
-        <${TiltNotes} t=${p.tilt} />
-        <div class="vp-foot muted">Profile dated <b>${p.date}</b> · Times on the region clock · ${p.source}</div>
+        ${layers}
+        <${ProfileChart} p=${p} per=${p.vtot} of="of the day" tilt=${tl} today=${td} show=${show}
+                         top=${tl && show.tilt ? "Running total with the tilt (an order from open to close), share of the day" : "Running total, share of the day"}
+                         bot=${tl && show.tilt ? "Share of the day per bucket, tilted" : "Share of the day per bucket"} />
+        ${show.tilt ? html`<${TiltNotes} t=${p.tilt} />` : null}
+        <div class="vp-foot muted">Profile dated <b>${p.date}</b> · Times on the region clock · ${p.source}${
+          td ? ` · today's trades: ${td.source}, refreshed every ${TODAY_REFRESH_MS / 1000}s` : ""}${
+          td ? (td.finished ? " · today's bars and line are shares of the day's total"
+                            : " · today's bars and line are shares of the day so far plus the forecast") : ""}</div>
       </div>`;
   }
 

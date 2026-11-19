@@ -2,7 +2,7 @@
   --bg: #f4f5f7; --card: #fff; --text: #1d2330; --muted: #6b7280; --line: #e7e9ee;
   --green-bg: #e3f4ea; --green: #2f7d4f; --amber-bg: #fcefd9; --amber: #a3661a;
   --red-bg: #fbe4e4; --red: #b03a3a; --blue-bg: #e4ecfb; --blue: #2f5bb0;
-  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a;
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100; --series-7: #6250d6;
   --flash: #fff6c9; --dash: #b5bac4; --grey-bg: #eef0f3; --fill: #4f8bdc; --ok: #2fa85b;
   --shadow: 0 1px 3px rgba(0,0,0,.06); color-scheme: light;
 }
@@ -12,7 +12,7 @@
   --bg: #0f1115; --card: #181b21; --text: #e6e8ec; --muted: #9aa1ad; --line: #2a2f38;
   --green-bg: #17331f; --green: #5cc489; --amber-bg: #3a2c12; --amber: #e0a54a;
   --red-bg: #3d1b1b; --red: #f07171; --blue-bg: #1a2a48; --blue: #7ea6f0;
-  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70;
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500; --series-7: #9085e9;
   --flash: #3a3413; --dash: #4b515c; --grey-bg: #262a32; --fill: #5b95e6; --ok: #3fbf6e;
   --shadow: 0 1px 3px rgba(0,0,0,.5); color-scheme: dark;
   }
@@ -21,7 +21,7 @@
   --bg: #0f1115; --card: #181b21; --text: #e6e8ec; --muted: #9aa1ad; --line: #2a2f38;
   --green-bg: #17331f; --green: #5cc489; --amber-bg: #3a2c12; --amber: #e0a54a;
   --red-bg: #3d1b1b; --red: #f07171; --blue-bg: #1a2a48; --blue: #7ea6f0;
-  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70;
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500; --series-7: #9085e9;
   --flash: #3a3413; --dash: #4b515c; --grey-bg: #262a32; --fill: #5b95e6; --ok: #3fbf6e;
   --shadow: 0 1px 3px rgba(0,0,0,.5); color-scheme: dark;
 }
@@ -149,3 +149,22 @@ tbody tr.clickable:hover td { background: var(--grey-bg); }
 .op-notes li { margin: 2px 0; }
 .op-tilt .op-note { flex-basis: 100%; font-size: 12px; }
 .op-tilt .theme-btn:disabled { opacity: .45; cursor: default; }
+/* today's trades and the forecast (Full Day tab) */
+.op-layers { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; margin: 0 0 8px; font-size: 13px; color: var(--muted); }
+.op-layers label { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; color: var(--text); }
+.op-layers input:disabled + * , .op-layers label:has(input:disabled) { opacity: .5; cursor: default; }
+.op-warn { color: var(--red); font-size: 12px; }
+.vp-bar.ghost { fill: none; stroke-width: 1.2; }
+.vp-bar.cont.ghost { stroke: var(--series-1); }
+.vp-bar.auct.ghost { stroke: var(--series-2); }
+.sw.ghost { background: none !important; border: 1.5px solid; }
+.sw-cont.ghost { border-color: var(--series-1); }
+.sw-auct.ghost { border-color: var(--series-2); }
+.vp-bar.today { fill: var(--series-3); }
+.vp-bar.fc { fill: var(--series-7); }
+.on > .vp-bar.today, .on > .vp-bar.fc { opacity: .8; }
+.sw-today { background: var(--series-3); }
+.sw-fc { background: var(--series-7); }
+.vp-today-line { fill: none; stroke: var(--series-3); stroke-width: 2; stroke-linejoin: round; }
+.vp-fc-line { fill: none; stroke: var(--series-7); stroke-width: 2; stroke-linejoin: round; stroke-dasharray: 6 3; }
+.vp-today-dot { fill: var(--series-3); stroke: var(--card); stroke-width: 2; }
