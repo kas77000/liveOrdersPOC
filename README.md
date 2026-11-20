@@ -41,6 +41,8 @@ demoed anywhere. Both can run at the same time for comparison.
 - Tickerplant (realtime only): `TP_HOST` / `TP_PORT`. Check it first with
   `.venv\Scripts\python realtime\scripts\check_tickerplant.py HOST PORT`
 - Volume profile (click a row): `VPROF_HOST` / `VPROF_PORT` of the VPROF gateway
+- Today's traded volume (Full Day tab): `QATT_HOST` / `QATT_PORT` of the QUOTES
+  real-time server that holds `qatt` (see [docs/today-volume-forecast.md](docs/today-volume-forecast.md))
 
 Tests, per folder: `cd poll` (or `cd realtime`), then `..\.venv\Scripts\python -m pytest -q`.
 
