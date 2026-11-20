@@ -168,3 +168,15 @@ tbody tr.clickable:hover td { background: var(--grey-bg); }
 .vp-today-line { fill: none; stroke: var(--series-3); stroke-width: 2; stroke-linejoin: round; }
 .vp-fc-line { fill: none; stroke: var(--series-7); stroke-width: 2; stroke-linejoin: round; stroke-dasharray: 6 3; }
 .vp-today-dot { fill: var(--series-3); stroke: var(--card); stroke-width: 2; }
+/* zoom (both volume profile tabs) */
+.vp-zoom { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; font-size: 12.5px; margin: 0 0 4px; }
+.vp-zoom > .muted:first-child { margin-right: 4px; }
+.vp-zbtn { font: inherit; font-size: 12px; color: var(--text); background: transparent; border: 1px solid var(--line);
+  border-radius: 999px; padding: 2px 10px; cursor: pointer; }
+.vp-zbtn:hover { background: var(--grey-bg); }
+.vp-zbtn.on { background: var(--blue-bg); border-color: var(--blue); color: var(--blue); font-weight: 600; }
+.vp-zbtn.reset { border-color: var(--blue); color: var(--blue); }
+.vp-zhint { font-size: 11.5px; margin-left: 4px; }
+.vp-chart svg { cursor: crosshair; user-select: none; }
+.vp-chart svg.dragging .vp-hit { cursor: ew-resize; }
+.vp-brush { fill: var(--blue); fill-opacity: .12; stroke: var(--blue); stroke-width: 1; stroke-dasharray: 3 2; pointer-events: none; }

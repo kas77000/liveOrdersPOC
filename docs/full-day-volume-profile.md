@@ -95,6 +95,12 @@ at 490 gives 0.130115.)
 - Top panel: running total, share of the day (0 → 100%).
 - Bottom panel: share of the day per bar; auctions in orange, labelled.
 - Footer: the profile's date, the region clock, the source.
+- Zoom (both tabs): drag across either panel to zoom both on that time range, or pick
+  a preset (Open, Morning, Afternoon, Close; those that fit the range). Zoomed, each
+  panel's y-scale refits to what is in view: the bars to the tallest one in view, the
+  running total to the visible range of its lines (the panel title then says the axis
+  does not start at 0%). Double-click, Esc or "Reset zoom" zooms out; Esc closes the
+  modal only when not zoomed. The zoom survives the 30s refresh of today's trades.
 
 Code: `GET /api/profile?sym=` (`poll/backend/app.py:121`) → `build` / `final_profile`
 (`poll/backend/profile.py:166`) → `FullDayTab` (`poll/frontend/profile.js:204`).

@@ -15,7 +15,7 @@
 //
 // The numbers come from backend/profile.py (build / order_profile / tilt_order_profile).
 (() => {
-  const { useEffect, useMemo, useState } = React;
+  const { useEffect, useMemo, useRef, useState } = React;
   const html = htm.bind(React.createElement);
 
   const pct = (v, d = 1) => (v == null ? "–" : `${(v * 100).toFixed(d)}%`);
@@ -55,7 +55,7 @@
   const AUCTION_NAME = { OPEN: "Open", PM: "PM", CLOSE: "Close" };
 
   function niceMax(v) {
-    const steps = [0.01, 0.02, 0.025, 0.05, 0.1, 0.2, 0.25, 0.5, 1];
+    const steps = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.8, 1];
     for (const s of steps) if (v <= s) return s;
     return 1;
   }
@@ -97,10 +97,50 @@
   //            p) and the forecast to the close, drawn as a share of today's
   //            forecast total so its shape compares with the profile's
   //   show     { profile, tilt, today, forecast } - which layers are drawn
+  //
+  // Zoom: drag across either panel to zoom both on that time range, or pick a preset
+  // (open, morning, afternoon, close). Zoomed, each panel's y-scale refits to what is
+  // in view; double-click, Esc or "Reset zoom" goes back to the whole range. The zoom
+  // is the chart's own state, so the 30s refresh of today's trades keeps it.
   const SHOW_ALL = { profile: true, tilt: true, today: true, forecast: true };
+  const PAD = 12;          // minutes either side, so the OPEN / CLOSE bars clear the axes
+  const MIN_ZOOM = 10;     // minutes: the narrowest zoom
+  const DRAG_PX = 8;       // a drag shorter than this (viewBox units) is a click
+
+  // ticks for a zoomed running-total axis: a round step, lo / hi on it
+  function niceRange(lo, hi) {
+    const steps = [0.002, 0.005, 0.01, 0.02, 0.025, 0.05, 0.1, 0.2, 0.25];
+    const span = Math.max(hi - lo, 0.004);
+    const step = steps.find((s) => span / s <= 5) || 0.25;
+    const a = Math.max(0, Math.floor(lo / step + 1e-9) * step);
+    let b = Math.ceil(hi / step - 1e-9) * step;
+    if (b <= a) b = a + step;
+    const ticks = [];
+    for (let v = a; v <= b + 1e-9; v += step) ticks.push(+v.toFixed(6));
+    return { lo: a, hi: b, ticks, dec: step < 0.01 ? 1 : 0 };
+  }
+
+  // quick ranges, clipped to the data; those too short or the whole range are dropped
+  function zoomPresets(rows, lunch, fa, fb) {
+    const cont = rows.filter((r) => r.phase === "continuous");
+    const cA = cont.length ? cont[0].start : rows[0].start;
+    const cB = cont.length ? cont[cont.length - 1].end : rows[rows.length - 1].end;
+    const hasOpen = rows[0].phase !== "continuous", hasClose = rows[rows.length - 1].phase !== "continuous";
+    const out = [[hasOpen ? "Open" : "First hour", fa, cA + 60]];
+    if (lunch && lunch[0] > cA && lunch[1] < cB) out.push(["Morning", fa, lunch[0] + 5], ["Afternoon", lunch[1] - 5, fb]);
+    out.push([hasClose ? "Close" : "Last hour", cB - 60, fb]);
+    const whole = fb - fa;
+    return out.map(([k, a, b]) => ({ key: k, a: Math.max(fa, a), b: Math.min(fb, b) }))
+              .filter((z) => z.b - z.a >= 15 && z.b - z.a < 0.9 * whole);
+  }
 
   function ProfileChart({ p, per, of, top, bot, marker, tilt, today, show = SHOW_ALL }) {
     const [hover, setHover] = useState(null);
+    const [zoom, setZoom] = useState(null);       // { a, b, key } in minutes, or null
+    const [drag, setDrag] = useState(null);       // { a, b } while dragging
+    const svgRef = useRef(null);
+    const dragRef = useRef(null);
+    const clipId = useMemo(() => "vpc" + Math.random().toString(36).slice(2, 9), []);
     const tiltOn = !!(tilt && show.tilt);
     // with the tilt hidden, the profile is the market's own (base_*)
     const rows = useMemo(() => (tilt && !tiltOn
@@ -112,20 +152,51 @@
     const baseOn = tiltOn && show.profile;           // the market's line under the tilt
     const ghost = todayOn || fcOn;                   // profile bars as outlines behind today's
 
+    const tA = rows[0].start, tB = rows[rows.length - 1].end;
+    const fa = tA - PAD, fb = tB + PAD;
+    // the zoom, clipped to the data (an edited order window may have moved away from it)
+    const za = zoom ? Math.max(fa, zoom.a) : fa, zb = zoom ? Math.min(fb, zoom.b) : fb;
+    const zoomed = !!zoom && zb - za >= MIN_ZOOM / 2;
+    const t0 = zoomed ? za : fa, t1 = zoomed ? zb : fb;
+    const presets = useMemo(() => zoomPresets(rows, p.lunch, fa, fb), [rows, p.lunch, fa, fb]);
+
     const geo = useMemo(() => {
-      // a margin either side so the OPEN / CLOSE bars and labels clear the axes
-      const PAD = 12;   // minutes
-      const tA = rows[0].start, tB = rows[rows.length - 1].end;
-      const t0 = tA - PAD, t1 = tB + PAD;
       const x = (m) => L + ((m - t0) / (t1 - t0)) * (W - L - R);
+      const inView = (r) => r.end > t0 && r.start < t1;
       // today, as a share of its forecast total: a (traded) + f (forecast) per bucket
       const T = td ? td.forecast_day || 1 : 1;
       const tr = td ? td.rows.map((r) => ({ a: r.actual / T, f: r.forecast / T, el: r.elapsed })) : [];
+      // bucket panel: scaled to the bars in view
       const tops = [];
-      if (mainOn) tops.push(...rows.map((r) => r.share));
-      if (todayOn || fcOn) tops.push(...tr.map((r) => (todayOn ? r.a : 0) + (fcOn ? r.f : 0)));
+      rows.forEach((r, i) => {
+        if (!inView(r)) return;
+        if (mainOn) tops.push(r.share);
+        if (todayOn || fcOn) tops.push((todayOn ? tr[i].a : 0) + (fcOn ? tr[i].f : 0));
+      });
       const yMax = niceMax(Math.max(0.001, ...tops) * 1.08);
-      const yc = (v) => TOP.y1 - v * (TOP.y1 - TOP.y0);
+      // running-total panel: 0-100%, or zoomed, the range of the lines in view
+      let cr = { lo: 0, hi: 1, ticks: [0, 0.25, 0.5, 0.75, 1], dec: 0 };
+      if (zoomed) {
+        const vals = [];
+        let pc = 0, pb = 0, pa = 0, pf = 0;
+        rows.forEach((r, i) => {
+          const e = tr[i], ca = pa + (e ? e.a : 0), cf = pf + (e ? e.a + e.f : 0);
+          if (inView(r)) {
+            if (mainOn) vals.push(pc, r.cum);
+            if (baseOn && r.base_cum != null) vals.push(pb, r.base_cum);
+            if (todayOn && e && e.el > 0) vals.push(pa, ca);
+            if (fcOn && e && e.el < 1) vals.push(pf + (e.el > 0 ? e.a : 0), cf);
+          }
+          pc = r.cum; pb = r.base_cum ?? 0; pa = ca; pf = cf;
+        });
+        if (marker && marker.t >= t0 && marker.t <= t1) vals.push(marker.expected, Math.min(1, marker.filled));
+        if (vals.length) {
+          let lo = Math.min(...vals), hi = Math.max(...vals);
+          const m = Math.max((hi - lo) * 0.06, 0.002);
+          cr = niceRange(Math.max(0, lo - m), Math.min(1, hi + m));
+        }
+      }
+      const yc = (v) => TOP.y1 - ((v - cr.lo) / (cr.hi - cr.lo)) * (TOP.y1 - TOP.y0);
       const yb = (v) => BOT.y1 - (v / yMax) * (BOT.y1 - BOT.y0);
       // step-accurate running total: flat until a bucket starts, rising across it
       const stepLine = (key) => {
@@ -160,23 +231,67 @@
           fLine = f;
         }
       }
-      const span = t1 - t0, step = span > 300 ? 60 : span > 120 ? 30 : 15;
+      const span = t1 - t0;
+      const step = span > 300 ? 60 : span > 120 ? 30 : span > 60 ? 15 : span > 25 ? 10 : 5;
       const hours = [];
       for (let m = Math.ceil(t0 / step) * step; m <= t1; m += step) hours.push(m);
       const bTicks = [0, yMax / 2, yMax];
       const bDec = bTicks.every((v) => Math.abs(v * 100 - Math.round(v * 100)) < 1e-9) ? 0 : 1;
-      return { x, yc, yb, line, baseLine, tLine, fLine, nowX, nowY, tr, T, hours, bTicks, bDec, t0, t1 };
-    }, [rows, tilt, td, mainOn, todayOn, fcOn]);
-    const { x, yc, yb, tr } = geo;
+      return { x, yc, yb, line, baseLine, tLine, fLine, nowX, nowY, tr, T, hours, bTicks, bDec, cr, inView };
+    }, [rows, tilt, td, mainOn, baseOn, todayOn, fcOn, t0, t1, zoomed, marker]);
+    const { x, yc, yb, tr, inView } = geo;
+
+    // viewBox x -> minute, from a mouse position
+    const minuteAt = (clientX) => {
+      const b = svgRef.current.getBoundingClientRect();
+      const vx = ((clientX - b.left) / b.width) * W;
+      const m = t0 + ((vx - L) / (W - L - R)) * (t1 - t0);
+      return Math.max(t0, Math.min(t1, m));
+    };
+    const onMouseDown = (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();                          // no text selection while dragging
+      const m = minuteAt(e.clientX);
+      dragRef.current = { a: m, b: m };
+      setDrag(dragRef.current);
+    };
+    const dragging = drag != null;
+    useEffect(() => {
+      if (!dragging) return;
+      const move = (e) => { dragRef.current = { ...dragRef.current, b: minuteAt(e.clientX) }; setDrag(dragRef.current); };
+      const up = () => {
+        const d = dragRef.current;
+        dragRef.current = null;
+        setDrag(null);
+        if (!d || Math.abs(x(d.b) - x(d.a)) < DRAG_PX) return;
+        let a = Math.min(d.a, d.b), b = Math.max(d.a, d.b);
+        if (b - a < MIN_ZOOM) { const c = (a + b) / 2; a = c - MIN_ZOOM / 2; b = c + MIN_ZOOM / 2; }
+        setZoom({ a, b, key: null });
+      };
+      window.addEventListener("mousemove", move);
+      window.addEventListener("mouseup", up);
+      return () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
+    }, [dragging, t0, t1]);
+    // Esc zooms out first; the modal only closes on an Esc when not zoomed
+    useEffect(() => {
+      if (!zoomed) return;
+      const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); setZoom(null); } };
+      window.addEventListener("keydown", onKey, true);
+      return () => window.removeEventListener("keydown", onKey, true);
+    }, [zoomed]);
+
     const h = hover != null ? rows[hover] : null;
     const ht = h && td ? td.rows[hover] : null;
     const auctions = rows.filter((r) => r.phase !== "continuous").map((r) => (AUCTION_NAME[r.label] || r.label).toLowerCase());
-    const showLunch = p.lunch && p.lunch[0] >= geo.t0 && p.lunch[1] <= geo.t1;
+    const lunchA = p.lunch ? Math.max(t0, p.lunch[0]) : 0, lunchB = p.lunch ? Math.min(t1, p.lunch[1]) : 0;
+    const showLunch = p.lunch && lunchB > lunchA;
     const profName = td ? "Profile" : marker ? "Expected progress" : "Running total";
+    const within = (t) => t != null && t >= t0 && t <= t1;
+    const cx = (v) => Math.max(L, Math.min(W - R, v));     // an x clamped to the plot
 
     // the order now: where it should be (on the line) and where it is
     let mk = null;
-    if (marker) {
+    if (marker && within(marker.t)) {
       const mx = x(marker.t), right = mx < (L + W - R) / 2;
       const ye = yc(marker.expected), yf = yc(Math.min(1, marker.filled));
       // keep the two labels apart when the points are close
@@ -184,9 +299,23 @@
       mk = { mx, ye, yf, anchor: right ? "start" : "end", dx: right ? 9 : -9,
              yeL: apart ? Math.min(ye, yf) - 7 : ye + 4, yfL: apart ? Math.max(ye, yf) + 13 : yf + 4 };
     }
-    const nowOn = td && (todayOn || fcOn) && !td.finished && td.now_min >= geo.t0 && td.now_min <= geo.t1;
+    const nowOn = td && (todayOn || fcOn) && !td.finished && within(td.now_min);
+    const whole = of === "of the order" ? "Whole order" : "Whole day";
+    const clipT = `url(#${clipId}-t)`, clipB = `url(#${clipId}-b)`;
 
     return html`
+      <div>
+        <div class="vp-zoom">
+          <span class="muted">Zoom</span>
+          <button class=${"vp-zbtn" + (zoomed ? "" : " on")} onClick=${() => setZoom(null)}>${whole}</button>
+          ${presets.map((z) => html`
+            <button key=${z.key} class=${"vp-zbtn" + (zoomed && zoom.key === z.key ? " on" : "")}
+                    onClick=${() => setZoom(z)}>${z.key}</button>`)}
+          ${zoomed ? html`<button class="vp-zbtn reset" onClick=${() => setZoom(null)} title="Esc or double-click the chart">Reset zoom</button>` : null}
+          <span class="muted vp-zhint">${zoomed
+            ? `${clock(t0)}–${clock(t1)} · double-click or Esc to zoom out`
+            : "drag across the chart to zoom"}</span>
+        </div>
       <div class="vp-chart">
         <div class="vp-legend">
           ${mainOn ? html`<span><i class=${"sw sw-cont" + (ghost ? " ghost" : "")}></i>${td ? "Profile, per 10 min" : "Continuous, per 10 min"}</span>` : null}
@@ -197,53 +326,64 @@
           ${fcOn ? html`<span><i class="sw sw-fc"></i>Forecast to the close</span>` : null}
           ${marker ? html`<span><i class="sw sw-fill"></i>Filled now</span>` : null}
         </div>
-        <svg viewBox=${`0 0 ${W} ${H}`} role="img"
+        <svg ref=${svgRef} viewBox=${`0 0 ${W} ${H}`} role="img" class=${dragging ? "dragging" : ""}
              aria-label=${`Volume profile for ${p.sym}: share ${of} per bucket and running total`}
-             onMouseLeave=${() => setHover(null)}>
+             onMouseLeave=${() => setHover(null)} onMouseDown=${onMouseDown}
+             onDoubleClick=${() => setZoom(null)}>
+          <defs>
+            <clipPath id=${clipId + "-t"}><rect x=${L} y=${TOP.y0 - 6} width=${W - L - R} height=${TOP.y1 - TOP.y0 + 8} /></clipPath>
+            <clipPath id=${clipId + "-b"}><rect x=${L} y=${BOT.y0 - 22} width=${W - L - R} height=${BOT.y1 - BOT.y0 + 22} /></clipPath>
+          </defs>
           ${showLunch ? html`
-            <rect class="vp-lunch" x=${x(p.lunch[0])} y=${TOP.y0} width=${x(p.lunch[1]) - x(p.lunch[0])}
+            <rect class="vp-lunch" x=${x(lunchA)} y=${TOP.y0} width=${x(lunchB) - x(lunchA)}
                   height=${BOT.y1 - TOP.y0} />
-            <text class="vp-note" x=${(x(p.lunch[0]) + x(p.lunch[1])) / 2} y=${TOP.y0 + 12} text-anchor="middle">lunch</text>` : null}
+            <text class="vp-note" x=${(x(lunchA) + x(lunchB)) / 2} y=${TOP.y0 + 12} text-anchor="middle">lunch</text>` : null}
 
-          ${[0, 0.25, 0.5, 0.75, 1].map((v) => html`
+          ${geo.cr.ticks.map((v) => html`
             <line key=${"gc" + v} class="vp-grid" x1=${L} x2=${W - R} y1=${yc(v)} y2=${yc(v)} />
-            <text key=${"tc" + v} class="vp-tick" x=${L - 6} y=${yc(v) + 4} text-anchor="end">${v * 100}%</text>`)}
-          <text class="vp-panel" x=${L} y=${TOP.y0 - 14}>${top}</text>
-          ${baseOn && geo.baseLine ? html`<path class="vp-line base" d=${geo.baseLine} />` : null}
-          ${mainOn ? html`<path class="vp-line" d=${geo.line} />` : null}
-          ${fcOn && geo.fLine ? html`<path class="vp-fc-line" d=${geo.fLine} />` : null}
-          ${todayOn ? html`<path class="vp-today-line" d=${geo.tLine} />` : null}
-          ${tiltOn && tilt.breakpoint != null && tilt.breakpoint >= geo.t0 && tilt.breakpoint <= geo.t1 ? html`
+            <text key=${"tc" + v} class="vp-tick" x=${L - 6} y=${yc(v) + 4} text-anchor="end">${pct(v, geo.cr.dec)}</text>`)}
+          <text class="vp-panel" x=${L} y=${TOP.y0 - 14}>${top}${zoomed && geo.cr.lo > 0 ? " · axis zoomed, not from 0%" : ""}</text>
+          <g clipPath=${clipT}>
+            ${baseOn && geo.baseLine ? html`<path class="vp-line base" d=${geo.baseLine} />` : null}
+            ${mainOn ? html`<path class="vp-line" d=${geo.line} />` : null}
+            ${fcOn && geo.fLine ? html`<path class="vp-fc-line" d=${geo.fLine} />` : null}
+            ${todayOn ? html`<path class="vp-today-line" d=${geo.tLine} />` : null}
+          </g>
+          ${tiltOn && within(tilt.breakpoint) ? html`
             <line class="vp-bp" x1=${x(tilt.breakpoint)} x2=${x(tilt.breakpoint)} y1=${TOP.y0} y2=${TOP.y1} />
             <text class="vp-bpl" x=${x(tilt.breakpoint) + 4} y=${TOP.y1 - 4}>breakpoint ${clock(tilt.breakpoint)}</text>` : null}
 
           ${geo.bTicks.map((v, i) => html`
             <line key=${"gb" + i} class=${i === 0 ? "vp-base" : "vp-grid"} x1=${L} x2=${W - R} y1=${yb(v)} y2=${yb(v)} />
             <text key=${"tb" + i} class="vp-tick" x=${L - 6} y=${yb(v) + 4} text-anchor="end">${pct(v, geo.bDec)}</text>`)}
-          <text class="vp-panel" x=${L} y=${BOT.y0 - 14}>${bot}</text>
-          ${(todayOn || fcOn) ? rows.map((r, i) => {
-            // today's bar: traded at the bottom, the forecast stacked on it
-            const x0 = x(r.start) + 1, w = Math.max(1, x(r.end) - x(r.start) - 2), e = tr[i];
-            const a = todayOn ? e.a : 0, f = fcOn ? e.f : 0;
-            return html`<g key=${"t" + i} class=${hover === i ? "on" : ""}>
-              ${a > 0 ? (f > 0 ? html`<rect class="vp-bar today" x=${x0} width=${w} y=${yb(a)} height=${yb(0) - yb(a)} />`
-                               : html`<path class="vp-bar today" d=${barPath(x0, w, yb(a), yb(0))} />`) : null}
-              ${f > 0 ? html`<path class="vp-bar fc" d=${barPath(x0, w, yb(a + f), yb(a))} />` : null}
-            </g>`;
-          }) : null}
-          ${mainOn ? rows.map((r, i) => {
-            const x0 = x(r.start) + 1, w = Math.max(1, x(r.end) - x(r.start) - 2);   // 2px gap
-            const auction = r.phase !== "continuous";
-            return html`<path key=${"b" + i} d=${barPath(x0, w, yb(Math.max(0, r.share)), yb(0))}
-                              class=${"vp-bar " + (auction ? "auct" : "cont") + (ghost ? " ghost" : "") + (hover === i ? " on" : "")} />`;
-          }) : null}
-          ${rows.filter((r) => r.phase !== "continuous").map((r) => {
-            const i = rows.indexOf(r), e = tr[i];
-            const topv = Math.max(mainOn ? r.share : 0, e ? (todayOn ? e.a : 0) + (fcOn ? e.f : 0) : 0);
-            return html`
-            <text key=${"l" + r.label} class="vp-label" y=${yb(topv) - 8}
-                  x=${(x(r.start) + x(r.end)) / 2} text-anchor="middle">${AUCTION_NAME[r.label] || r.label}</text>`;
-          })}
+          <text class="vp-panel" x=${L} y=${BOT.y0 - 14}>${bot}${zoomed ? " · scaled to the bars in view" : ""}</text>
+          <g clipPath=${clipB}>
+            ${(todayOn || fcOn) ? rows.map((r, i) => {
+              if (!inView(r)) return null;
+              // today's bar: traded at the bottom, the forecast stacked on it
+              const x0 = x(r.start) + 1, w = Math.max(1, x(r.end) - x(r.start) - 2), e = tr[i];
+              const a = todayOn ? e.a : 0, f = fcOn ? e.f : 0;
+              return html`<g key=${"t" + i} class=${hover === i ? "on" : ""}>
+                ${a > 0 ? (f > 0 ? html`<rect class="vp-bar today" x=${x0} width=${w} y=${yb(a)} height=${yb(0) - yb(a)} />`
+                                 : html`<path class="vp-bar today" d=${barPath(x0, w, yb(a), yb(0))} />`) : null}
+                ${f > 0 ? html`<path class="vp-bar fc" d=${barPath(x0, w, yb(a + f), yb(a))} />` : null}
+              </g>`;
+            }) : null}
+            ${mainOn ? rows.map((r, i) => {
+              if (!inView(r)) return null;
+              const x0 = x(r.start) + 1, w = Math.max(1, x(r.end) - x(r.start) - 2);   // 2px gap
+              const auction = r.phase !== "continuous";
+              return html`<path key=${"b" + i} d=${barPath(x0, w, yb(Math.max(0, r.share)), yb(0))}
+                                class=${"vp-bar " + (auction ? "auct" : "cont") + (ghost ? " ghost" : "") + (hover === i ? " on" : "")} />`;
+            }) : null}
+            ${rows.filter((r) => r.phase !== "continuous" && inView(r)).map((r) => {
+              const i = rows.indexOf(r), e = tr[i];
+              const topv = Math.max(mainOn ? r.share : 0, e ? (todayOn ? e.a : 0) + (fcOn ? e.f : 0) : 0);
+              return html`
+              <text key=${"l" + r.label} class="vp-label" y=${yb(topv) - 8}
+                    x=${cx((x(r.start) + x(r.end)) / 2)} text-anchor="middle">${AUCTION_NAME[r.label] || r.label}</text>`;
+            })}
+          </g>
 
           ${geo.hours.map((m) => html`
             <text key=${"x" + m} class="vp-tick" x=${x(m)} y=${H - 8} text-anchor="middle">${clock(m)}</text>`)}
@@ -261,15 +401,20 @@
             <text class="vp-mlabel" x=${mk.mx + mk.dx} y=${mk.yeL} text-anchor=${mk.anchor}>Expected ${pct(marker.expected, 0)}</text>
             <text class="vp-mlabel" x=${mk.mx + mk.dx} y=${mk.yfL} text-anchor=${mk.anchor}>Filled ${pct(marker.filled, 0)}</text>` : null}
 
-          ${h ? html`<line class="vp-cross" x1=${x(h.end)} x2=${x(h.end)}
+          ${h && !dragging ? html`<line class="vp-cross" x1=${cx(x(h.end))} x2=${cx(x(h.end))}
                            y1=${TOP.y0} y2=${BOT.y1} />
-                     ${mainOn ? html`<circle class="vp-dot" cx=${x(h.end)} cy=${yc(h.cum)} r="4" />` : null}` : null}
-          ${rows.map((r, i) => html`
-            <rect key=${"h" + i} class="vp-hit" x=${x(r.start)} y=${TOP.y0} width=${Math.max(4, x(r.end) - x(r.start))}
-                  height=${BOT.y1 - TOP.y0} onMouseEnter=${() => setHover(i)} />`)}
+                     ${mainOn && within(h.end) ? html`<circle class="vp-dot" cx=${x(h.end)} cy=${yc(h.cum)} r="4" />` : null}` : null}
+          ${drag ? html`<rect class="vp-brush" x=${Math.min(x(drag.a), x(drag.b))} y=${TOP.y0}
+                              width=${Math.abs(x(drag.b) - x(drag.a))} height=${BOT.y1 - TOP.y0} />` : null}
+          ${rows.map((r, i) => {
+            if (!inView(r)) return null;
+            const x0 = cx(x(r.start)), x1 = cx(x(r.end));
+            return html`<rect key=${"h" + i} class="vp-hit" x=${x0} y=${TOP.y0} width=${Math.max(4, x1 - x0)}
+                              height=${BOT.y1 - TOP.y0} onMouseEnter=${() => setHover(i)} />`;
+          })}
         </svg>
-        ${h ? html`
-          <div class="vp-tip" style=${tipStyle(x(h.end) / W)}>
+        ${h && !dragging ? html`
+          <div class="vp-tip" style=${tipStyle(cx(x(h.end)) / W)}>
             <b>${h.phase === "continuous" ? `${clock(h.start)}–${clock(h.end)}` : `${AUCTION_NAME[h.label] || h.label} auction`}</b>
             ${mainOn ? html`<div>${td ? "profile: " : ""}${pct(h.share, 2)} ${of} · ${compact(h.share * per)} sh</div>
             <div class="muted">running total at ${clock(h.end)}: ${pct(h.cum, 1)}${
@@ -279,6 +424,7 @@
               ${fcOn && ht.forecast > 0 ? html`<div>forecast: ${compact(ht.forecast)} sh</div>` : null}
               <div class="muted">today ${pct((ht.actual + ht.forecast) / geo.T, 2)} of the day's ${td.finished ? "total" : "forecast"}</div>` : null}
           </div>` : null}
+      </div>
       </div>`;
   }
 
