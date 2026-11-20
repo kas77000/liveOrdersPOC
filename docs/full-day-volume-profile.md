@@ -95,7 +95,11 @@ at 490 gives 0.130115.)
 - Top panel: running total, share of the day (0 → 100%).
 - Bottom panel: share of the day per bar; auctions in orange, labelled.
 - Footer: the profile's date, the region clock, the source.
-- Zoom (both tabs): drag across either panel to zoom both on that time range, or pick
+- Zoom (both tabs): once zoomed, drag the chart to move along the day (shift+drag
+  still selects a range). Not zoomed, drag across either panel to zoom both on that
+  time range, scroll
+  the mouse wheel over the chart (zooms around the pointer; shift+wheel pans; fully
+  zoomed out, wheel down scrolls the modal as usual), or pick
   a preset (Open, Morning, Afternoon, Close; those that fit the range). Zoomed, each
   panel's y-scale refits to what is in view: the bars to the tallest one in view, the
   running total to the visible range of its lines (the panel title then says the axis

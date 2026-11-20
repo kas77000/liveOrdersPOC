@@ -46,12 +46,12 @@
 
   // ------------------------------------------------------------------ chart
   // Two panels on one time axis (never one chart with two y-scales): the running
-  // total on top, the share per bucket below. Geometry is in viewBox units; the
-  // SVG scales to the modal's width.
-  const W = 760, L = 48, R = 14;
-  const TOP = { y0: 30, y1: 160 };        // running-total panel
-  const BOT = { y0: 214, y1: 344 };       // bucket panel
-  const H = 370;
+  // total on top, the share per bucket below. The viewBox is as wide as the chart
+  // is on screen (measured), so a wider modal gives more room, not bigger text.
+  const W0 = 760, L = 48, R = 14;          // W0: the width before the first measure
+  const TOP = { y0: 30, y1: 190 };        // running-total panel
+  const BOT = { y0: 244, y1: 404 };       // bucket panel
+  const H = 430;
   const AUCTION_NAME = { OPEN: "Open", PM: "PM", CLOSE: "Close" };
 
   function niceMax(v) {
@@ -139,6 +139,15 @@
     const [zoom, setZoom] = useState(null);       // { a, b, key } in minutes, or null
     const [drag, setDrag] = useState(null);       // { a, b } while dragging
     const svgRef = useRef(null);
+    const boxRef = useRef(null);
+    const [W, setW] = useState(W0);
+    useEffect(() => {
+      const el = boxRef.current;
+      if (!el || typeof ResizeObserver === "undefined") return;
+      const ro = new ResizeObserver(([e]) => setW(Math.max(480, Math.round(e.contentRect.width))));
+      ro.observe(el);
+      return () => ro.disconnect();
+    }, []);
     const dragRef = useRef(null);
     const clipId = useMemo(() => "vpc" + Math.random().toString(36).slice(2, 9), []);
     const tiltOn = !!(tilt && show.tilt);
@@ -238,7 +247,7 @@
       const bTicks = [0, yMax / 2, yMax];
       const bDec = bTicks.every((v) => Math.abs(v * 100 - Math.round(v * 100)) < 1e-9) ? 0 : 1;
       return { x, yc, yb, line, baseLine, tLine, fLine, nowX, nowY, tr, T, hours, bTicks, bDec, cr, inView };
-    }, [rows, tilt, td, mainOn, baseOn, todayOn, fcOn, t0, t1, zoomed, marker]);
+    }, [rows, tilt, td, mainOn, baseOn, todayOn, fcOn, t0, t1, zoomed, marker, W]);
     const { x, yc, yb, tr, inView } = geo;
 
     // viewBox x -> minute, from a mouse position
@@ -248,22 +257,42 @@
       const m = t0 + ((vx - L) / (W - L - R)) * (t1 - t0);
       return Math.max(t0, Math.min(t1, m));
     };
+    // Mouse drag: zoomed, it moves the chart along the day (pan); not zoomed, or with
+    // shift held, it selects a time range to zoom on.
     const onMouseDown = (e) => {
       if (e.button !== 0) return;
       e.preventDefault();                          // no text selection while dragging
-      const m = minuteAt(e.clientX);
-      dragRef.current = { a: m, b: m };
+      if (zoomed && !e.shiftKey) {
+        const b = svgRef.current.getBoundingClientRect();
+        dragRef.current = { pan: true, x0: e.clientX, t0, t1, plotPx: ((W - L - R) / W) * b.width };
+      } else {
+        const m = minuteAt(e.clientX);
+        dragRef.current = { a: m, b: m };
+      }
       setDrag(dragRef.current);
     };
     const dragging = drag != null;
+    const panning = !!(drag && drag.pan);
     useEffect(() => {
       if (!dragging) return;
-      const move = (e) => { dragRef.current = { ...dragRef.current, b: minuteAt(e.clientX) }; setDrag(dragRef.current); };
+      const move = (e) => {
+        const d = dragRef.current;
+        if (!d) return;
+        if (d.pan) {
+          // the day follows the pointer: drag right to see earlier, left to see later
+          const span = d.t1 - d.t0;
+          const sh = Math.max(fa - d.t0, Math.min(fb - d.t1, (-(e.clientX - d.x0) / d.plotPx) * span));
+          setZoom({ a: d.t0 + sh, b: d.t1 + sh, key: null });
+          return;
+        }
+        dragRef.current = { ...d, b: minuteAt(e.clientX) };
+        setDrag(dragRef.current);
+      };
       const up = () => {
         const d = dragRef.current;
         dragRef.current = null;
         setDrag(null);
-        if (!d || Math.abs(x(d.b) - x(d.a)) < DRAG_PX) return;
+        if (!d || d.pan || Math.abs(x(d.b) - x(d.a)) < DRAG_PX) return;
         let a = Math.min(d.a, d.b), b = Math.max(d.a, d.b);
         if (b - a < MIN_ZOOM) { const c = (a + b) / 2; a = c - MIN_ZOOM / 2; b = c + MIN_ZOOM / 2; }
         setZoom({ a, b, key: null });
@@ -271,7 +300,43 @@
       window.addEventListener("mousemove", move);
       window.addEventListener("mouseup", up);
       return () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
-    }, [dragging, t0, t1]);
+    }, [dragging, t0, t1, fa, fb]);
+    // Mouse wheel: zoom around the pointer (up = in, down = out); shift+wheel or a
+    // sideways trackpad swipe pans when zoomed. Fully zoomed out, a wheel down is left
+    // to scroll the modal. A native, non-passive listener, so preventDefault holds.
+    const viewRef = useRef(null);
+    viewRef.current = { t0, t1, fa, fb, W };
+    useEffect(() => {
+      const el = svgRef.current;
+      if (!el) return;
+      const onWheel = (e) => {
+        const v = viewRef.current, span = v.t1 - v.t0, whole = v.fb - v.fa;
+        const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1;   // lines / pages -> px
+        let dy = e.deltaY * unit, dx = e.deltaX * unit;
+        if (e.shiftKey && !dx) { dx = dy; dy = 0; }
+        const b = el.getBoundingClientRect();
+        const plotPx = ((v.W - L - R) / v.W) * b.width;
+        if (Math.abs(dx) > Math.abs(dy)) {                 // pan
+          if (span >= whole) return;
+          e.preventDefault();
+          const sh = Math.max(v.fa - v.t0, Math.min(v.fb - v.t1, (dx / plotPx) * span));
+          setZoom({ a: v.t0 + sh, b: v.t1 + sh, key: null });
+          return;
+        }
+        if (!dy || (dy > 0 && span >= whole)) return;      // nothing to zoom out: scroll the page
+        e.preventDefault();
+        const vx = ((e.clientX - b.left) / b.width) * v.W;
+        const m = Math.max(v.t0, Math.min(v.t1, v.t0 + ((vx - L) / (v.W - L - R)) * span));
+        const ns = Math.max(MIN_ZOOM, Math.min(whole, span * Math.exp(dy * 0.002)));
+        if (ns >= whole - 1e-6) { setZoom(null); return; }
+        let a = m - (m - v.t0) * (ns / span), z = a + ns;   // the minute under the pointer stays put
+        if (a < v.fa) { z += v.fa - a; a = v.fa; }
+        if (z > v.fb) { a -= z - v.fb; z = v.fb; }
+        setZoom({ a, b: z, key: null });
+      };
+      el.addEventListener("wheel", onWheel, { passive: false });
+      return () => el.removeEventListener("wheel", onWheel);
+    }, []);
     // Esc zooms out first; the modal only closes on an Esc when not zoomed
     useEffect(() => {
       if (!zoomed) return;
@@ -313,10 +378,10 @@
                     onClick=${() => setZoom(z)}>${z.key}</button>`)}
           ${zoomed ? html`<button class="vp-zbtn reset" onClick=${() => setZoom(null)} title="Esc or double-click the chart">Reset zoom</button>` : null}
           <span class="muted vp-zhint">${zoomed
-            ? `${clock(t0)}–${clock(t1)} · double-click or Esc to zoom out`
-            : "drag across the chart to zoom"}</span>
+            ? `${clock(t0)}–${clock(t1)} · drag to move along the day · double-click or Esc to zoom out`
+            : "drag or scroll the wheel on the chart to zoom"}</span>
         </div>
-      <div class="vp-chart">
+      <div class="vp-chart" ref=${boxRef}>
         <div class="vp-legend">
           ${mainOn ? html`<span><i class=${"sw sw-cont" + (ghost ? " ghost" : "")}></i>${td ? "Profile, per 10 min" : "Continuous, per 10 min"}</span>` : null}
           ${mainOn && auctions.length ? html`<span><i class=${"sw sw-auct" + (ghost ? " ghost" : "")}></i>${td ? "Profile auctions" : `Auctions (${auctions.join(", ")})`}</span>` : null}
@@ -326,7 +391,8 @@
           ${fcOn ? html`<span><i class="sw sw-fc"></i>Forecast to the close</span>` : null}
           ${marker ? html`<span><i class="sw sw-fill"></i>Filled now</span>` : null}
         </div>
-        <svg ref=${svgRef} viewBox=${`0 0 ${W} ${H}`} role="img" class=${dragging ? "dragging" : ""}
+        <svg ref=${svgRef} viewBox=${`0 0 ${W} ${H}`} role="img"
+             class=${panning ? "panning" : dragging ? "dragging" : zoomed ? "pannable" : ""}
              aria-label=${`Volume profile for ${p.sym}: share ${of} per bucket and running total`}
              onMouseLeave=${() => setHover(null)} onMouseDown=${onMouseDown}
              onDoubleClick=${() => setZoom(null)}>
@@ -404,7 +470,7 @@
           ${h && !dragging ? html`<line class="vp-cross" x1=${cx(x(h.end))} x2=${cx(x(h.end))}
                            y1=${TOP.y0} y2=${BOT.y1} />
                      ${mainOn && within(h.end) ? html`<circle class="vp-dot" cx=${x(h.end)} cy=${yc(h.cum)} r="4" />` : null}` : null}
-          ${drag ? html`<rect class="vp-brush" x=${Math.min(x(drag.a), x(drag.b))} y=${TOP.y0}
+          ${drag && !drag.pan ? html`<rect class="vp-brush" x=${Math.min(x(drag.a), x(drag.b))} y=${TOP.y0}
                               width=${Math.abs(x(drag.b) - x(drag.a))} height=${BOT.y1 - TOP.y0} />` : null}
           ${rows.map((r, i) => {
             if (!inView(r)) return null;
